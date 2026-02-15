@@ -1,0 +1,97 @@
+services:
+  fastapi:
+    build: .
+    restart: always
+    command: poetry run uvicorn app.main:app --reload --host 0.0.0.0
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      - CASSANDRA_HOST=cassandra
+      - CASSANDRA_PORT=9042
+      - REDIS_HOST=redis
+      - STORAGE_BACKEND=minio
+      - MINIO_ENDPOINT=http://minio:9000
+    depends_on:
+      cassandra:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    networks:
+      - dataset-net
+
+  frontend:
+    build: ../frontend
+    restart: always
+    ports:
+      - "5173:5173"
+    volumes:
+      - ../frontend:/app
+      - /app/node_modules # Don't overwrite node_modules with host mount
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8000/api/v1
+    depends_on:
+      - fastapi
+    networks:
+      - dataset-net
+
+  cassandra:
+    image: cassandra:4.1
+    ports:
+      - "9042:9042"
+    environment:
+      - CASSANDRA_CLUSTER_NAME=datasetmanager
+      - CASSANDRA_DC=DC1
+      - CASSANDRA_RACK=RAC1
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    healthcheck:
+      test: [ "CMD-SHELL", "nodetool status | grep -E '^UN\\s+' || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    networks:
+      - dataset-net
+
+  redis:
+    image: redis:7.2
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - dataset-net
+
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - dataset-net
+
+networks:
+  dataset-net:
+    driver: bridge
+
+volumes:
+  minio_data:
+  cassandra_data:
+  redis_data:
