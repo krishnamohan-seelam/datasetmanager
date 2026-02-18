@@ -33,11 +33,9 @@ class DataMasker:
 
         local, domain = email.split("@")
         if len(local) <= 2:
-            masked_local = "*" * len(local)
-        else:
-            masked_local = local[0] + "*" * (len(local) - 2) + local[-1]
+            return f"{local}@{domain}"
 
-        return f"{masked_local}@{domain}"
+        return f"{local[:2]}***@{domain}"
 
     @staticmethod
     def mask_phone(phone: str) -> str:
@@ -93,7 +91,7 @@ class DataMasker:
 
         parts = name.split()
         masked_parts = [
-            part[0] + "*" * (len(part) - 1) if len(part) > 1 else "*" for part in parts
+            part[0] + "***" if len(part) > 1 else "*" for part in parts
         ]
         return " ".join(masked_parts)
 
