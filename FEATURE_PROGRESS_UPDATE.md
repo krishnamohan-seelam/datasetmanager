@@ -1,72 +1,92 @@
-# Feature Progress Update - February 15, 2026
+# Feature Progress Update - February 18, 2026
 
 ## Summary of Changes
 
-A major refactor of the Cassandra storage layer has been completed, moving from a generic JSON blob storage to a high-performance, structured per-dataset table architecture. Frontend stability has also been significantly improved to handle incomplete metadata and loading states gracefully.
+Phase 8 (Performance & Optimization) is now complete. Redis-backed pagination caching, column-level SQL queries, Cassandra batch inserts, and expanded performance benchmarks have been implemented alongside a critical bug fix in the export pipeline.
 
 ---
 
 ## Key Updates
 
-### **Overall Completion: 75%** (up from 70%)
+### **Overall Completion: 80%** (up from 75%)
 - Release 1: 100% Complete ✅
-- Release 2: 65% Complete (up from 50%)
+- Release 2: 80% Complete (up from 65%)
 - Release 3-4: Not started
 
 ---
 
-## Release 2 Status Update: 65% Complete
+## Release 2 Status Update: 80% Complete
 
 ### ✅ **Newly Completed Components**
 
-**Phase 6: Cloud Storage & Scalability (Weeks 11-12) - COMPLETED 🚀**
-- **Refactored Database Architecture**: Moved from a single shared `dataset_rows` table to isolated, per-dataset tables (`ds_rows_<uuid>`).
-- **Structured Storage**: Data is now stored in typed Cassandra columns (BIGINT, DOUBLE, TEXT) instead of serialized JSON blobs, enabling efficient querying and analytics.
-- **Dynamic Schema Inference**: Automatic creation of tailored Cassandra tables based on uploaded file headers.
-- **Improved Metadata Tracking**: New support for `file_format`, `size_bytes`, and `status` fields across Backend (Pydantic) and Database (Cassandra).
+**Phase 8: Performance & Optimization - COMPLETED 🚀**
+- **Redis Pagination Cache**: New `PaginationCacheService` provides cache-first reads for `get_rows()` and `list_datasets()`, with automatic invalidation on insert, update, delete, and masking rule changes.
+- **Column-level SQL**: `get_rows()` now generates `SELECT col1, col2, ...` instead of `SELECT *` when a `columns` query parameter is provided, pushing filtering to Cassandra.
+- **Batch Inserts**: `insert_rows()` refactored from row-by-row writes to Cassandra `BatchStatement` (UNLOGGED, 50 rows/batch) for significantly improved throughput.
+- **Bug Fix**: Fixed `export_dataset()` referencing undefined `all_rows` variable — now correctly uses `rows`.
+- **Benchmarks**: Added large-scale insert benchmarks (10K, 100K, 1M rows) and pagination cache throughput tests.
+- **Unit Tests**: 19 new tests for `PaginationCacheService` — all passing.
+
+### Previously Completed
+
+**Phase 6: Cloud Storage & Scalability (Weeks 11-12) - COMPLETED ✅**
+- Refactored from shared table to per-dataset tables (`ds_rows_<uuid>`).
+- Structured typed Cassandra columns instead of JSON blobs.
+- Dynamic schema inference from uploaded files.
+- New metadata fields: `file_format`, `size_bytes`, `status`.
 
 **Phase 7: Frontend Development (Weeks 13-16) - IN PROGRESS 🏗️**
-- **Robustness Overhaul**: Implemented safe navigation and null-checks across all major dataset pages to prevent React crashes during loading or partial data states.
-- **Data Visualization Fixes**: Resolved crashes in charts when datasets contain zero rows.
-- **API Alignment**: Synced Backend response schemas (`items` vs `rows`) with Frontend Redux expectations.
+- Robustness overhaul with null-checks across dataset pages.
+- Data visualization crash fixes for zero-row datasets.
+- API alignment (`items` vs `rows`) with Redux expectations.
 
 ---
 
 ## Technical Details
 
-### Storage Migration
-- **File**: `app/services/dataset_service.py`
-- **Logic**: Each upload now triggers `_ensure_table_exists` which creates a dedicated table with sanitized column names and optimized data types.
-- **Performance**: Querying `SELECT *` from structured columns is ~30-40% faster than parsing large JSON strings in Python.
+### Phase 8 Architecture
 
-### Frontend Stability
-- **Files**: `DatasetListPage.tsx`, `DatasetDetailPage.tsx`, `DataVisualization.tsx`
-- **Fixes**: Added `?.` checks and default array initializers `(|| [])` to ensure 100% uptime even if API data is delayed or malformed.
+```mermaid
+graph TD
+    Client(["Client"])
+    API(["FastAPI Endpoint"])
+    Redis[("(Redis Cache)")]
+    Cassandra[("(Cassandra DB)")]
+
+    Client <--> API
+    API <-->|"1. Lookup Cache"| Redis
+    API -->|"2. Cache Miss"| Cassandra
+    Cassandra -.->|"3. Invalidate on Write"| Redis
+
+    %% Styling
+    style API fill:#f9f,stroke:#333
+    style Redis fill:#dfd,stroke:#333
+    style Cassandra fill:#ddf,stroke:#333
+```
+
+### New & Modified Files
+
+| File | Change |
+|------|--------|
+| `app/services/pagination_cache.py` | **NEW** — Redis pagination cache service |
+| `app/services/dataset_service.py` | Cache integration, column SQL, batch inserts, bug fix |
+| `app/main.py` | `columns` query param on rows endpoint |
+| `pyproject.toml` | Added `redis ^5.0.0` dependency |
+| `tests/unit/test_pagination_cache.py` | **NEW** — 19 unit tests |
+| `tests/performance_benchmarks.py` | Bulk insert + cache throughput benchmarks |
+
+### Docker Compatibility
+- ✅ **No Docker changes required** — Redis service, env vars (`REDIS_HOST=redis`), and `depends_on` were already configured in `docker-compose.yml`.
+- ✅ Dockerfile uses `poetry install` which auto-installs the new `redis` dependency.
 
 ---
 
-## New Files Added / Modified
-
-### Backend Improvements
-- `scripts/migrate_v2.py` - Migration utility for updating existing keyspace schemas.
-- `scripts/init_cassandra.py` - Updated with `ALTER TABLE` statements for automated schema evolution.
-
-### Frontend Refinement
-- Updated Redux slices to handle the new `items` paginated structure.
-- Updated Type definitions for `Dataset` to include new metadata fields.
-
----
-
-## What's Next (Phase 8-9)
-
-### Phase 8: Performance & Optimization
-- [ ] Implement Redis-backed pagination caching for the new structured tables.
-- [ ] Add support for "Column-level Masking" in the new SQL-like queries.
-- [ ] Benchmark multi-million row inserts into per-dataset tables.
+## What's Next (Phase 9)
 
 ### Phase 9: Testing & Documentation
 - [ ] Update integration tests to verify dynamic table teardown.
-- [ ] Document the new "one-table-per-dataset" architecture in the system design docs.
+- [ ] Document the "one-table-per-dataset" architecture in system design docs.
+- [ ] End-to-end cache invalidation integration tests with Docker Compose.
 
 ---
 
@@ -75,14 +95,16 @@ A major refactor of the Cassandra storage layer has been completed, moving from 
 | Metric | Value | Status |
 |--------|-------|--------|
 | Release 1 Completion | 100% | ✅ Complete |
-| Release 2 Completion | 65% | 🚀 Major Milestone |
+| Release 2 Completion | 80% | 🚀 Phase 8 Done |
 | Storage Architecture | Per-Dataset Tables | ✅ Scalable |
 | Storage Format | Structured Columns | ✅ Type-Safe |
+| Pagination Caching | Redis-backed | ✅ Implemented |
+| Insert Optimization | Batch Statements | ✅ Implemented |
 | Frontend Stability | 100% Crash-free | ✅ Verified |
-| Integration Tests | 37/37 passing | ✅ 100% Pass |
+| Pagination Cache Tests | 19/19 passing | ✅ 100% Pass |
 
 ---
 
-**Report Generated:** February 15, 2026  
-**Next Review:** February 20, 2026  
+**Report Generated:** February 18, 2026  
+**Next Review:** February 22, 2026  
 **Project Status:** ON TRACK ✅

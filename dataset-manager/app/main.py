@@ -475,6 +475,7 @@ async def get_dataset_rows(
     dataset_id: uuid.UUID,
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=1000),
+    columns: Optional[str] = Query(None, description="Comma-separated column names to select"),
     current_user: dict = Depends(get_current_user),
 ):
     """Get paginated rows from dataset"""
@@ -487,8 +488,14 @@ async def get_dataset_rows(
         ):
             raise HTTPException(status_code=403, detail="Access denied")
 
+        # Parse columns parameter
+        column_list = None
+        if columns:
+            column_list = [c.strip() for c in columns.split(",") if c.strip()]
+
         rows, total = dataset_service.get_rows(
-            dataset_id, page, page_size, current_user["role"]
+            dataset_id, page, page_size, current_user["role"],
+            columns=column_list,
         )
 
         return RowsResponse(

@@ -20,6 +20,7 @@ from ..core.exceptions import (
 )
 from ..core.masking import DataMasker
 from ..core.config import settings
+from .pagination_cache import PaginationCacheService
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,10 @@ class DatasetService:
     def __init__(self):
         self.db = CassandraClient([settings.CASSANDRA_HOST], settings.CASSANDRA_PORT)
         self.keyspace = settings.CASSANDRA_KEYSPACE
+        self.cache = PaginationCacheService(
+            host=settings.REDIS_HOST,
+            port=settings.REDIS_PORT,
+        )
 
     def _get_table_name(self, dataset_id: UUID) -> str:
         """Generate a safe Cassandra table name from dataset ID"""
@@ -188,10 +193,15 @@ class DatasetService:
     def list_datasets(
         self, page: int = 1, page_size: int = 100, search: Optional[str] = None
     ) -> Tuple[List[Dict[str, Any]], int]:
-        """List datasets with pagination and optional search"""
+        """List datasets with pagination and optional search (cached)"""
         try:
-            # For MVP, use simple SELECT without search
-            # Full-text search would require additional indexes
+            # Check cache first
+            cached = self.cache.get_datasets_list(page, page_size, search)
+            if cached is not None:
+                logger.debug(f"Cache hit for datasets list page={page}")
+                return cached
+
+            # Cache miss — query Cassandra
             query = f"""
                 SELECT dataset_id, name, description, owner, tags, is_public, 
                        created_at, updated_at, row_count, size_bytes, file_format, status
@@ -234,7 +244,11 @@ class DatasetService:
                 for row in paginated_rows
             ]
 
-            return datasets, len(all_rows)
+            total = len(all_rows)
+            # Store in cache
+            self.cache.set_datasets_list(page, page_size, datasets, total, search)
+
+            return datasets, total
         except Exception as e:
             logger.error(f"Failed to list datasets: {e}")
             raise DatabaseException(f"Failed to list datasets: {str(e)}")
@@ -275,6 +289,10 @@ class DatasetService:
 
             self.db.execute(query, values)
             logger.info(f"Updated dataset {dataset_id}")
+
+            # Invalidate caches
+            self.cache.invalidate_all_for_dataset(dataset_id)
+
             return self.get_dataset(dataset_id)
         except DatasetNotFoundException:
             raise
@@ -285,6 +303,9 @@ class DatasetService:
     def delete_dataset(self, dataset_id: UUID) -> bool:
         """Delete dataset and all associated data"""
         try:
+            # Invalidate caches first
+            self.cache.invalidate_all_for_dataset(dataset_id)
+
             # Delete dataset
             query = f"DELETE FROM {self.keyspace}.datasets WHERE dataset_id = %s"
             self.db.execute(query, [dataset_id])
@@ -315,13 +336,16 @@ class DatasetService:
             raise DatabaseException(f"Failed to delete dataset: {str(e)}")
 
     def insert_rows(
-        self, dataset_id: UUID, rows: List[Dict[str, Any]], chunk_size: int = 10000
+        self, dataset_id: UUID, rows: List[Dict[str, Any]], chunk_size: int = 10000,
+        batch_size: int = 50,
     ) -> int:
-        """Insert rows into dataset"""
+        """Insert rows into dataset using batched writes for throughput"""
         try:
+            from cassandra.query import BatchStatement, SimpleStatement, BatchType
+
             inserted_count = 0
             table_name = self._get_table_name(dataset_id)
-        
+
             # Ensure table exists before insertion, using the first row for schema
             if rows:
                 self._ensure_table_exists(dataset_id, table_name, rows[0])
@@ -330,13 +354,15 @@ class DatasetService:
 
             for chunk_id, i in enumerate(range(0, len(rows), chunk_size)):
                 chunk = rows[i : i + chunk_size]
+                batch = BatchStatement(batch_type=BatchType.UNLOGGED)
+                batch_count = 0
 
                 for row_id, row_data in enumerate(chunk):
                     # Build dynamic insert query
                     cols = ["row_chunk_id", "row_id"]
                     placeholders = ["%s", "%s"]
                     values = [chunk_id, row_id]
-                    
+
                     for col_name, val in row_data.items():
                         # Handle nulls
                         if val is None or (isinstance(val, float) and math.isnan(val)):
@@ -345,13 +371,24 @@ class DatasetService:
                         placeholders.append("%s")
                         values.append(val)
 
-                    query = f"""
+                    stmt = SimpleStatement(f"""
                         INSERT INTO {self.keyspace}.{table_name}
                         ({", ".join(cols)})
                         VALUES ({", ".join(placeholders)})
-                    """
-                    self.db.execute(query, values)
+                    """)
+                    batch.add(stmt, values)
+                    batch_count += 1
                     inserted_count += 1
+
+                    # Flush batch when it reaches batch_size
+                    if batch_count >= batch_size:
+                        self.db.execute(batch)
+                        batch = BatchStatement(batch_type=BatchType.UNLOGGED)
+                        batch_count = 0
+
+                # Flush remaining rows in batch
+                if batch_count > 0:
+                    self.db.execute(batch)
 
             # Update row count
             query = f"""
@@ -361,12 +398,10 @@ class DatasetService:
             """
             self.db.execute(query, [inserted_count, datetime.utcnow(), dataset_id])
 
+            # Invalidate caches
+            self.cache.invalidate_all_for_dataset(dataset_id)
+
             logger.info(f"Inserted {inserted_count} rows into dataset {dataset_id}")
-            
-            # Automatically set schema if it's the first insert (Already handled at start of method)
-            # if inserted_count > 0:
-            #     self.set_dataset_schema(dataset_id, rows[0])
-                
             return inserted_count
         except Exception as e:
             logger.error(f"Failed to insert rows: {e}")
@@ -426,9 +461,12 @@ class DatasetService:
                 config[column_name] = mask_rule
             else:
                 config.pop(column_name, None)
-            
+
             self.update_dataset(dataset_id, masking_config=config)
-            
+
+            # 3. Invalidate row caches since masking changed
+            self.cache.invalidate_dataset(dataset_id)
+
             logger.info(f"Updated masking rule for {dataset_id}:{column_name}")
         except Exception as e:
             logger.error(f"Failed to update masking rule: {e}")
@@ -443,11 +481,27 @@ class DatasetService:
         columns: Optional[List[str]] = None,
         apply_masking: bool = True,
     ) -> Tuple[List[Dict[str, Any]], int]:
-        """Get paginated rows from dataset with optional masking"""
+        """Get paginated rows from dataset with optional masking (cached)"""
         try:
-            # Get dataset to access schema and masking config
+            # Build columns key for cache
+            col_key = ",".join(sorted(columns)) if columns else None
+
+            # Check cache first
+            cached = self.cache.get_rows_page(
+                dataset_id, page, page_size, user_role, col_key
+            )
+            if cached is not None:
+                logger.debug(f"Cache hit for dataset {dataset_id} rows page={page}")
+                return cached
+
+            # Cache miss — query Cassandra
             dataset = self.get_dataset(dataset_id)
             masking_config = dataset.get("masking_config", {})
+
+            # Get schema to map storage names back to original names
+            schema = self.get_dataset_schema(dataset_id)
+            name_map = {self._sanitize_col_name(s["name"]): s["name"] for s in schema}
+            reverse_map = {s["name"]: self._sanitize_col_name(s["name"]) for s in schema}
 
             # Calculate which chunks to fetch
             offset = (page - 1) * page_size
@@ -455,9 +509,20 @@ class DatasetService:
             start_row = offset % 10000
 
             table_name = self._get_table_name(dataset_id)
-            # Select all columns
+
+            # Column-level SQL: select only requested columns if specified
+            if columns:
+                safe_cols = ["row_chunk_id", "row_id"]
+                for col in columns:
+                    safe_name = reverse_map.get(col, self._sanitize_col_name(col))
+                    if safe_name not in safe_cols:
+                        safe_cols.append(safe_name)
+                select_clause = ", ".join(safe_cols)
+            else:
+                select_clause = "*"
+
             query = f"""
-                SELECT *
+                SELECT {select_clause}
                 FROM {self.keyspace}.{table_name}
                 WHERE row_chunk_id = %s
                 ORDER BY row_id ASC
@@ -469,11 +534,6 @@ class DatasetService:
             )
             rows = list(result)[start_row : start_row + page_size]
 
-            # Get schema to map storage names back to original names
-            schema = self.get_dataset_schema(dataset_id)
-            # Map: storage_name (sanitized) -> original_name
-            name_map = {self._sanitize_col_name(s["name"]): s["name"] for s in schema}
-
             processed_rows = []
             for row in rows:
                 # Reconstruct row data from columns
@@ -483,10 +543,6 @@ class DatasetService:
                         continue
                     orig_name = name_map.get(field, field)
                     row_dict[orig_name] = getattr(row, field)
-
-                # Apply column filtering
-                if columns:
-                    row_dict = {k: v for k, v in row_dict.items() if k in columns}
 
                 # Apply masking
                 if apply_masking and user_role != "admin":
@@ -499,7 +555,15 @@ class DatasetService:
 
                 processed_rows.append(row_dict)
 
-            return processed_rows, dataset.get("row_count", 0)
+            total = dataset.get("row_count", 0)
+
+            # Store in cache
+            self.cache.set_rows_page(
+                dataset_id, page, page_size, user_role,
+                processed_rows, total, col_key
+            )
+
+            return processed_rows, total
         except DatasetNotFoundException:
             raise
         except Exception as e:
@@ -548,12 +612,12 @@ class DatasetService:
                             )
 
             if format.lower() == "csv":
-                return self._export_csv(all_rows)
+                return self._export_csv(rows)
             elif format.lower() == "json":
-                return json.dumps(all_rows, default=str).encode()
+                return json.dumps(rows, default=str).encode()
             else:
                 # Default to CSV
-                return self._export_csv(all_rows)
+                return self._export_csv(rows)
         except Exception as e:
             logger.error(f"Failed to export dataset: {e}")
             raise DatabaseException(f"Failed to export dataset: {str(e)}")
