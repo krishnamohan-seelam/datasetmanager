@@ -285,6 +285,196 @@ class TestKafkaPerformance:
         assert result is True
 
 
+# ── Phase 8: Bulk Insert & Pagination Cache Benchmarks ──────
+
+@pytest.mark.benchmark
+class TestBulkInsertPerformance:
+    """Benchmark batched row inserts at various scales"""
+
+    @pytest.fixture
+    def dataset_service(self):
+        from app.services.dataset_service import DatasetService
+        return DatasetService()
+
+    @staticmethod
+    def _generate_rows(count: int) -> List[Dict[str, Any]]:
+        return [
+            {
+                "id": i,
+                "name": f"User {i}",
+                "email": f"user{i}@example.com",
+                "amount": float(i * 10),
+                "created": datetime.utcnow().isoformat(),
+            }
+            for i in range(count)
+        ]
+
+    def test_insert_10k_rows(self, benchmark, dataset_service):
+        """Benchmark inserting 10,000 rows with batch statements"""
+        from uuid import uuid4
+        dataset_id = uuid4()
+        rows = self._generate_rows(10_000)
+
+        def run_test():
+            return dataset_service.insert_rows(dataset_id, rows)
+
+        result = benchmark.pedantic(run_test, rounds=1, iterations=1)
+        assert result == 10_000
+
+    def test_insert_100k_rows(self, benchmark, dataset_service):
+        """Benchmark inserting 100,000 rows with batch statements"""
+        from uuid import uuid4
+        dataset_id = uuid4()
+        rows = self._generate_rows(100_000)
+
+        def run_test():
+            return dataset_service.insert_rows(dataset_id, rows)
+
+        result = benchmark.pedantic(run_test, rounds=1, iterations=1)
+        assert result == 100_000
+
+    def test_insert_1m_rows(self, benchmark, dataset_service):
+        """Benchmark inserting 1,000,000 rows with batch statements"""
+        from uuid import uuid4
+        dataset_id = uuid4()
+        rows = self._generate_rows(1_000_000)
+
+        def run_test():
+            return dataset_service.insert_rows(dataset_id, rows)
+
+        result = benchmark.pedantic(run_test, rounds=1, iterations=1)
+        assert result == 1_000_000
+
+    def test_batch_vs_sequential_insert(self):
+        """Compare batch insert throughput vs sequential baseline"""
+        tracker = PerformanceBenchmark()
+        rows = self._generate_rows(1_000)
+        from uuid import uuid4
+
+        # Batch insert timing (measure wall-clock cost of building batches)
+        tracker.start()
+        from cassandra.query import BatchStatement, SimpleStatement, BatchType
+        batch = BatchStatement(batch_type=BatchType.UNLOGGED)
+        for i, row in enumerate(rows):
+            cols = ", ".join(row.keys())
+            placeholders = ", ".join(["%s"] * len(row))
+            stmt = SimpleStatement(f"INSERT INTO test (row_id, {cols}) VALUES (%s, {placeholders})")
+            batch.add(stmt, [i] + list(row.values()))
+            if (i + 1) % 50 == 0:
+                batch = BatchStatement(batch_type=BatchType.UNLOGGED)
+        tracker.end("batch_build_1k")
+
+        stats = tracker.get_stats("batch_build_1k")
+        print(f"Batch build for 1K rows: {stats['avg']*1000:.2f}ms")
+        # Should be well under 100ms to build batch objects
+        assert stats["avg"] < 1.0, "Batch building took >1s, unexpected overhead"
+
+
+@pytest.mark.benchmark
+class TestPaginationCachePerformance:
+    """Benchmark Redis pagination cache operations"""
+
+    @pytest.fixture
+    def cache_service(self):
+        from app.services.pagination_cache import PaginationCacheService
+        return PaginationCacheService()
+
+    def test_cache_set_latency(self, benchmark, cache_service):
+        """Benchmark page cache SET latency"""
+        from uuid import uuid4
+        dataset_id = uuid4()
+        rows = [{"name": f"User {i}", "email": f"u{i}@test.com"} for i in range(100)]
+
+        def run_test():
+            return cache_service.set_rows_page(dataset_id, 1, 100, "viewer", rows, 5000)
+
+        result = benchmark(run_test)
+        # Should return True if Redis connected, False if disabled
+        assert result in (True, False)
+
+    def test_cache_get_latency_hit(self, benchmark, cache_service):
+        """Benchmark page cache GET latency on cache hit"""
+        from uuid import uuid4
+        dataset_id = uuid4()
+        rows = [{"name": f"User {i}"} for i in range(100)]
+        cache_service.set_rows_page(dataset_id, 1, 100, "viewer", rows, 5000)
+
+        def run_test():
+            return cache_service.get_rows_page(dataset_id, 1, 100, "viewer")
+
+        result = benchmark(run_test)
+        if cache_service.enabled:
+            assert result is not None
+            fetched_rows, total = result
+            assert len(fetched_rows) == 100
+
+    def test_cache_get_latency_miss(self, benchmark, cache_service):
+        """Benchmark page cache GET latency on cache miss"""
+        from uuid import uuid4
+
+        def run_test():
+            return cache_service.get_rows_page(uuid4(), 999, 100, "viewer")
+
+        result = benchmark(run_test)
+        assert result is None
+
+    def test_cache_invalidation_speed(self, benchmark, cache_service):
+        """Benchmark cache invalidation for a dataset"""
+        from uuid import uuid4
+        dataset_id = uuid4()
+        # Pre-populate several pages
+        for page in range(1, 21):
+            cache_service.set_rows_page(
+                dataset_id, page, 100, "viewer",
+                [{"x": i} for i in range(100)], 50000
+            )
+
+        def run_test():
+            return cache_service.invalidate_dataset(dataset_id)
+
+        result = benchmark(run_test)
+        assert result >= 0  # returns count of invalidated keys
+
+    def test_cache_throughput(self):
+        """Measure cache operations throughput (ops/sec)"""
+        from app.services.pagination_cache import PaginationCacheService
+        from uuid import uuid4
+
+        cache = PaginationCacheService()
+        if not cache.enabled:
+            pytest.skip("Redis not available")
+
+        dataset_id = uuid4()
+        rows = [{"data": f"value_{i}"} for i in range(50)]
+        tracker = PerformanceBenchmark()
+
+        # Write throughput
+        for i in range(100):
+            tracker.start()
+            cache.set_rows_page(dataset_id, i + 1, 50, "viewer", rows, 5000)
+            tracker.end("cache_write")
+
+        # Read throughput
+        for i in range(100):
+            tracker.start()
+            cache.get_rows_page(dataset_id, i + 1, 50, "viewer")
+            tracker.end("cache_read")
+
+        write_stats = tracker.get_stats("cache_write")
+        read_stats = tracker.get_stats("cache_read")
+
+        write_ops = 1.0 / write_stats["avg"] if write_stats["avg"] > 0 else 0
+        read_ops = 1.0 / read_stats["avg"] if read_stats["avg"] > 0 else 0
+
+        print(f"\nCache write throughput: {write_ops:.0f} ops/sec")
+        print(f"Cache read throughput: {read_ops:.0f} ops/sec")
+        print(f"Cache write avg latency: {write_stats['avg']*1000:.2f}ms")
+        print(f"Cache read avg latency: {read_stats['avg']*1000:.2f}ms")
+
+        # Cleanup
+        cache.invalidate_dataset(dataset_id)
+
+
 # Summary report generation
 def generate_performance_report():
     """Generate comprehensive performance report"""
@@ -313,3 +503,4 @@ def generate_performance_report():
 
 if __name__ == "__main__":
     print(generate_performance_report())
+

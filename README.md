@@ -66,21 +66,41 @@ A high-performance, scalable platform designed for managing, analyzing, and secu
 ## 📁 Project Structure
 
 ```text
-dataset-manager/
-├── app/                  # FastAPI Application
-│   ├── core/             # Security, Masking, Config
-│   ├── services/         # Dataset & Permission Logic
-│   ├── integrations/     # S3, Kafka, Redis, Cassandra
-│   └── middleware/       # Audit Logging, Rate Limiting
-├── scripts/              # Migration & Init scripts
-└── tests/                # Unit & Integration tests
-
-frontend/
-├── src/
-│   ├── components/       # Reusable UI components
-│   ├── pages/            # View components (List, Detail, Upload)
-│   ├── store/            # Redux Slices & Hooks
-│   └── api/              # Axios Client & Endpoints
+datasetmanager/
+├── dataset-manager/              # Backend (Python/FastAPI)
+│   ├── app/
+│   │   ├── core/                 # Security, Masking, Config
+│   │   ├── services/             # Dataset, Permission, Pagination Cache
+│   │   ├── schemas/              # Pydantic request/response models
+│   │   ├── integrations/         # S3, Kafka, Redis, Local Storage
+│   │   ├── middleware/           # Audit Logging, Rate Limiting
+│   │   ├── monitoring/           # Prometheus Metrics, Grafana Config
+│   │   ├── utils/                # Shared helpers
+│   │   └── main.py              # FastAPI app & route definitions
+│   ├── airflow/dags/             # Airflow ETL pipeline DAGs
+│   ├── scripts/                  # DB migration & init scripts
+│   ├── tests/
+│   │   ├── unit/                 # Unit tests (services, cache)
+│   │   ├── integration/          # Integration tests (Release 2)
+│   │   └── performance_benchmarks.py
+│   ├── pyproject.toml            # Single dependency manifest
+│   ├── Dockerfile
+│   └── docker-compose.yml
+│
+├── frontend/                     # Frontend (React/TypeScript)
+│   ├── src/
+│   │   ├── api/                  # Axios client & endpoint wrappers
+│   │   ├── components/           # Reusable UI components
+│   │   ├── pages/                # Views (List, Detail, Upload, Analytics)
+│   │   ├── store/                # Redux Toolkit slices & hooks
+│   │   ├── types/                # TypeScript type definitions
+│   │   └── theme/                # MUI theme customization
+│   └── Dockerfile
+│
+├── Planning/                     # Architecture & design docs
+├── Enhanced-PRD.md               # Product Requirements Document
+├── FEATURE_PROGRESS_UPDATE.md    # Release progress tracker
+└── README.md
 ```
 
 ---
