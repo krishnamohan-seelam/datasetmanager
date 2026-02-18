@@ -265,7 +265,7 @@ class DatasetService:
 
             for key, value in updates.items():
                 if key == "masking_config":
-                    update_fields.append("masking_config = %s")
+                    update_fields.append("\"masking_config\" = %s")
                     values.append(json.dumps(value))
                 elif key == "tags":
                     update_fields.append("tags = %s")
@@ -435,7 +435,8 @@ class DatasetService:
                 {
                     "name": row.column_name,
                     "type": row.column_type,
-                    "masking_rule": row.masking_rule
+                    "mask_rule": row.masking_rule,
+                    "masked": bool(row.masking_rule)
                 }
                 for row in result
             ]
@@ -446,30 +447,39 @@ class DatasetService:
     def update_masking_rule(self, dataset_id: UUID, column_name: str, mask_rule: Optional[str]):
         """Update masking rule for a specific column and sync to dataset metadata"""
         try:
-            # 1. Update dataset_schema table
+            # 1. Update dataset_schema table (using quoted column name for safety)
             query = f"""
                 UPDATE {self.keyspace}.dataset_schema
-                SET masking_rule = %s
+                SET "masking_rule" = %s
                 WHERE dataset_id = %s AND column_name = %s
             """
             self.db.execute(query, [mask_rule, dataset_id, column_name])
 
-            # 2. Sync to masking_config in datasets table (for backward compatibility / convenience)
+            # 2. Sync to masking_config in datasets table
+            # We fetch once and update once
             dataset = self.get_dataset(dataset_id)
             config = dataset.get("masking_config", {})
+            
+            # Ensure it's a dict and not None
+            if not isinstance(config, dict):
+                config = {}
+
             if mask_rule:
                 config[column_name] = mask_rule
             else:
                 config.pop(column_name, None)
 
+            # Update the main metadata
             self.update_dataset(dataset_id, masking_config=config)
 
             # 3. Invalidate row caches since masking changed
             self.cache.invalidate_dataset(dataset_id)
 
-            logger.info(f"Updated masking rule for {dataset_id}:{column_name}")
+            logger.info(f"Updated masking rule for {dataset_id}:{column_name} to {mask_rule}")
         except Exception as e:
-            logger.error(f"Failed to update masking rule: {e}")
+            logger.error(f"Failed to update masking rule for {dataset_id}:{column_name}: {e}")
+            if isinstance(e, DatasetNotFoundException):
+                raise
             raise DatabaseException(f"Failed to update masking rule: {str(e)}")
 
     def get_rows(

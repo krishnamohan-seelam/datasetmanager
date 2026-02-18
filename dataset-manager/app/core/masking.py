@@ -17,10 +17,43 @@ class MaskingRule(str, Enum):
     NAME = "name"
     IP = "ip"
     CUSTOM = "custom"
+    
+    # Frontend aligned rules
+    REDACT = "redact"
+    HASH = "hash"
+    PARTIAL_EMAIL = "partial_email"
+    PARTIAL_TEXT = "partial_text"
+    NUMERIC_ROUND = "numeric_round"
 
 
 class DataMasker:
     """Centralized data masking utilities"""
+
+    @staticmethod
+    def mask_redact(value: Any) -> str:
+        """Fully redact the value"""
+        return "********"
+
+    @staticmethod
+    def mask_hash(value: Any) -> str:
+        """Return a truncated hash of the value"""
+        if value is None:
+            return None
+        import hashlib
+        return hashlib.sha256(str(value).encode()).hexdigest()[:12] + "..."
+
+    @staticmethod
+    def mask_numeric_round(value: Any) -> Any:
+        """Round numeric values to nearest 10 or 100"""
+        try:
+            num = float(value)
+            if abs(num) > 100:
+                return round(num / 100) * 100
+            return round(num / 10) * 10
+        except (ValueError, TypeError):
+            return "***"
+            
+    # Existing methods... (I will keep them in the actual replace call)
 
     @staticmethod
     def mask_email(email: str) -> str:
@@ -165,7 +198,7 @@ class DataMasker:
         str_value = str(value)
 
         # Apply appropriate masking rule
-        if mask_rule == MaskingRule.EMAIL:
+        if mask_rule in [MaskingRule.EMAIL, MaskingRule.PARTIAL_EMAIL]:
             return DataMasker.mask_email(str_value)
         elif mask_rule == MaskingRule.PHONE:
             return DataMasker.mask_phone(str_value)
@@ -173,10 +206,16 @@ class DataMasker:
             return DataMasker.mask_ssn(str_value)
         elif mask_rule == MaskingRule.CREDIT_CARD:
             return DataMasker.mask_credit_card(str_value)
-        elif mask_rule == MaskingRule.NAME:
+        elif mask_rule in [MaskingRule.NAME, MaskingRule.PARTIAL_TEXT]:
             return DataMasker.mask_name(str_value)
         elif mask_rule == MaskingRule.IP:
             return DataMasker.mask_ip(str_value)
+        elif mask_rule == MaskingRule.REDACT:
+            return DataMasker.mask_redact(str_value)
+        elif mask_rule == MaskingRule.HASH:
+            return DataMasker.mask_hash(str_value)
+        elif mask_rule == MaskingRule.NUMERIC_ROUND:
+            return DataMasker.mask_numeric_round(str_value)
         elif mask_rule.startswith("custom:"):
             pattern = mask_rule.replace("custom:", "")
             return DataMasker.mask_custom(str_value, pattern)
