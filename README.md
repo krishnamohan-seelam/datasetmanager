@@ -17,7 +17,7 @@ A high-performance, scalable platform designed for managing, analyzing, and secu
 ##  Project Documentation
 
 - **[Enhanced Product Requirements Document (PRD)](./Enhanced-PRD.md)**: Detailed specifications, system architecture, and project roadmap.
-- **[Feature Progress Update](./FEATURE_PROGRESS_UPDATE.md)**: Current implementation status, completed milestones, and upcoming tasks.
+- **[Feature Progress Update](./Feature-Progress.md)**: Current implementation status, completed milestones, and upcoming tasks.
 
 ---
 
