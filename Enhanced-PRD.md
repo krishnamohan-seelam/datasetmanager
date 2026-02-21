@@ -5,10 +5,10 @@ copilot-context: prd
 
 # Product Requirements Document: Dataset Manager Platform
 
-**Version:** 1.0  
-**Last Updated:** December 30, 2025  
+**Version:** 2.0  
+**Last Updated:** February 21, 2026  
 **Project Type:** Scalable Backend System for Dataset Management  
-**Technology Stack:** Python, FastAPI, Apache Cassandra, Apache Airflow
+**Technology Stack:** Python, FastAPI, Apache Cassandra, Apache Airflow, React (MUI v7)
 
 ---
 
@@ -74,7 +74,7 @@ Build a scalable backend system for uploading, managing, and sharing large datas
 ### Data Processing
 - **ETL**: 
   - Pandas (datasets < 1M rows)
-  - PySpark (datasets > 1M rows)
+  - Future implementation: PySpark (datasets > 1M rows)
 - **Orchestration**: Apache Airflow
 - **Message Queue**: Apache Kafka
 
@@ -89,10 +89,11 @@ Build a scalable backend system for uploading, managing, and sharing large datas
 - **Monitoring**: Prometheus + Grafana
 
 ### Frontend (Phase 2)
-- **Framework**: React with JavaScript
+- **Framework**: Vite + React + TypeScript
 - **State Management**: Redux Toolkit
-- **UI Library**: Material-UI or Ant Design
-- **API Client**: Axios with interceptors
+- **UI Library**: MUI v7 (Material-UI)
+- **Charts**: Recharts
+- **API Client**: Axios with JWT interceptors
 
 ---
 
@@ -204,16 +205,23 @@ CREATE TABLE dataset_schema (
 );
 ```
 
-#### Table: dataset_rows
-**Purpose**: Store actual dataset rows (partitioned by chunk)
+#### Table: dataset_rows (Legacy Pattern)
+> [!NOTE]
+> The original shared `dataset_rows` table has been refactored for scalability. Each dataset now has its own dedicated table for row storage.
+
+#### Table: ds_rows_<uuid> (Current Pattern)
+**Purpose**: Dedicated storage for each dataset's rows with structured columns.
+**Partitioning**: By `row_chunk_id` for efficient paginated access.
 ```cql
-CREATE TABLE dataset_rows (
-    dataset_id UUID,
-    row_chunk_id INT, -- Partition key (e.g., 0-999, 1000-1999)
-    row_id BIGINT,
-    row_data TEXT, -- JSON serialized row
-    created_at TIMESTAMP,
-    PRIMARY KEY ((dataset_id, row_chunk_id), row_id)
+CREATE TABLE ds_rows_<dataset_id> (
+    row_chunk_id INT,    -- Partition key (e.g., 0-999, 1000-1999)
+    row_id BIGINT,       -- Clustering key
+    -- Dynamic columns based on dataset schema
+    col1 TEXT,
+    col2 INT,
+    col3 DOUBLE,
+    ...,
+    PRIMARY KEY (row_chunk_id, row_id)
 ) WITH CLUSTERING ORDER BY (row_id ASC);
 ```
 
@@ -261,17 +269,39 @@ CREATE TABLE etl_jobs (
 );
 ```
 
+#### Table: users
+**Purpose**: Store user accounts and global roles
+```cql
+CREATE TABLE users (
+    email TEXT PRIMARY KEY,
+    username TEXT,
+    password_hash TEXT,
+    role TEXT, -- 'admin', 'user'
+    created_at TIMESTAMP,
+    last_login TIMESTAMP
+);
+```
+
 ### Performance Requirements
 
 | Metric | Target | Measurement |
 |--------|--------|-------------|
 | Metadata API Response | <200ms | p95 latency |
-| Data Query API Response | <2s | p95 latency |
+| Data Query API Response (Cached) | <100ms | p95 latency |
+| Data Query API Response (Cold) | <2s | p95 latency |
 | Concurrent Users | 10,000+ | Load testing |
 | Dataset Size Support | Up to 10TB | Integration testing |
 | ETL Throughput | 1M rows/min | Processing benchmarks |
-| Upload Throughput | 100 MB/s | Network + storage I/O |
+| Bulk Insert Throughput | 100K rows/sec | Cassandra Batch optimization |
 | Uptime SLA | 99.9% | Monthly availability |
+
+#### Pagination Caching (Redis)
+- **Performance**: Reduces p95 latency for paginated queries from ~1.5s to <80ms.
+
+#### Storage Factory Pattern
+- **Overview**: The system implements a factory pattern for storage backends.
+- **Backends supported**: AWS S3, MinIO (local S3 compatible), and Local Filesystem fallback.
+- **Benefit**: Seamless transition between development, staging, and production environments without code changes.
 
 ### Masking Strategies
 
@@ -280,11 +310,16 @@ CREATE TABLE etl_jobs (
 | Data Type | Rule Name | Example Input | Masked Output |
 |-----------|-----------|---------------|---------------|
 | Email | `email` | john.doe@example.com | jo***@example.com |
+| Email (Partial) | `partial_email` | john.doe@example.com | jo***@example.com |
 | Phone | `phone` | +1-555-123-4567 | ***-***-4567 |
 | SSN | `ssn` | 123-45-6789 | ***-**-6789 |
 | Credit Card | `credit_card` | 4532-1234-5678-9010 | ****-****-****-9010 |
 | Name | `name` | John Michael Doe | J*** M*** D*** |
+| Text (Partial) | `partial_text` | Sensitive Content | Sen***... |
 | IP Address | `ip` | 192.168.1.100 | 192.168.***.*** |
+| Redact | `redact` | Any Value | ******** |
+| Hash | `hash` | Secret Data | a1b2c3d4... (SHA256) |
+| Numeric Round | `numeric_round` | 12345 | 12300 |
 | Custom Regex | `custom:pattern` | User defined | User defined |
 
 #### Masking Implementation
@@ -346,13 +381,17 @@ Upload → S3 Storage → Kafka Event → Airflow DAG Trigger
 - **Development**: `http://localhost:8000/api/v1`
 - **Production**: `https://api.dataset-manager.com/api/v1`
 
-### Authentication
-All endpoints (except health check) require JWT token in header:
-```
 Authorization: Bearer <jwt_token>
 ```
 
 ### Endpoint Specifications
+
+#### 0. Authentication
+```http
+POST /auth/register
+POST /auth/login
+GET /auth/me
+```
 
 #### 1. List/Search Datasets
 ```http
@@ -505,18 +544,23 @@ GET /datasets/{dataset_id}
     "contributors": ["data-team@company.com"],
     "viewers": ["analytics@company.com", "marketing@company.com"]
   },
-  "preview": [
-    {
-      "customer_id": "CUST001",
-      "email": "jo***@example.com",
-      "age": 34
-    },
-    {
-      "customer_id": "CUST002",
-      "email": "sa***@example.com",
-      "age": 28
     }
   ]
+}
+```
+
+---
+
+#### 3.5 Schema & Masking Rules
+```http
+GET /datasets/{id}/schema
+PATCH /datasets/{id}/schema/{col}/masking
+```
+
+**PATCH Body**:
+```json
+{
+  "mask_rule": "email"
 }
 ```
 
@@ -991,9 +1035,16 @@ class DataMasker:
         
         masking_functions = {
             "email": DataMasker.mask_email,
+            "partial_email": DataMasker.mask_partial_email,
             "phone": DataMasker.mask_phone,
             "ssn": DataMasker.mask_ssn,
             "credit_card": DataMasker.mask_credit_card,
+            "name": DataMasker.mask_name,
+            "partial_text": DataMasker.mask_partial_text,
+            "ip": DataMasker.mask_ip,
+            "redact": DataMasker.mask_redact,
+            "hash": DataMasker.mask_hash,
+            "numeric_round": DataMasker.mask_numeric_round,
         }
         
         mask_fn = masking_functions.get(mask_rule)
@@ -1156,138 +1207,39 @@ class CassandraClient:
 ## Project Structure
 
 ```
-dataset-manager/
-├── README.md
-├── PRD.md                           # This file
-├── .env.example                     # Environment variables template
-├── .gitignore
-├── requirements.txt                 # Python dependencies
-├── docker-compose.yml               # Local development setup
-├── Dockerfile
-│
-├── app/                             # Main application package
-│   ├── __init__.py
-│   ├── main.py                      # FastAPI app entry point
-│   │
-│   ├── api/                         # API layer
-│   │   ├── __init__.py
-│   │   ├── v1/                      # API version 1
-│   │   │   ├── __init__.py
-│   │   │   ├── router.py            # Main API router
-│   │   │   └── endpoints/           # Endpoint modules
-│   │   │       ├── __init__.py
-│   │   │       ├── datasets.py      # Dataset CRUD endpoints
-│   │   │       ├── rows.py          # Row query endpoints
-│   │   │       ├── metadata.py      # Metadata management
-│   │   │       ├── auth.py          # Authentication endpoints
-│   │   │       └── health.py        # Health check endpoint
-│   │   └── deps.py                  # Shared dependencies (auth, db)
-│   │
-│   ├── core/                        # Core application logic
-│   │   ├── __init__.py
-│   │   ├── config.py                # Settings from environment
-│   │   ├── security.py              # Auth & RBAC logic
-│   │   ├── masking.py               # Data masking utilities
-│   │   └── exceptions.py            # Custom exceptions
-│   │
-│   ├── db/                          # Database layer
-│   │   ├── __init__.py
-│   │   ├── cassandra_client.py      # Cassandra connection manager
-│   │   ├── redis_client.py          # Redis cache manager
-│   │   ├── models.py                # Data models (if using ORM)
-│   │   └── repositories/            # Data access layer
-│   │       ├── __init__.py
-│   │       ├── dataset_repo.py
-│   │       ├── permission_repo.py
-│   │       └── audit_repo.py
-│   │
-│   ├── etl/                         # ETL pipeline modules
-│   │   ├── __init__.py
-│   │   ├── processors/              # Data processors
-│   │   │   ├── __init__.py
-│   │   │   ├── csv_processor.py
-│   │   │   ├── json_processor.py
-│   │   │   └── parquet_processor.py
-│   │   ├── validators.py            # Data validation
-│   │   ├── transformers.py          # Data transformation
-│   │   └── loaders.py               # Data loading to Cassandra
-│   │
-│   ├── services/                    # Business logic services
-│   │   ├── __init__.py
-│   │   ├── dataset_service.py       # Dataset management service
-│   │   ├── permission_service.py    # Permission management
-│   │   ├── masking_service.py       # Data masking service
-│   │   └── storage_service.py       # S3/GCS integration
-│   │
-│   ├── schemas/                     # Pydantic models (request/response)
-│   │   ├── __init__.py
-│   │   ├── dataset.py               # Dataset schemas
-│   │   ├── user.py                  # User schemas
-│   │   ├── permission.py            # Permission schemas
-│   │   └── common.py                # Shared schemas (pagination, etc.)
-│   │
-│   └── middleware/                  # Custom middleware
-│       ├── __init__.py
-│       ├── logging_middleware.py    # Request/response logging
-│       ├── rate_limit_middleware.py # Rate limiting
-│       └── cors_middleware.py       # CORS configuration
-│
-├── airflow/                         # Airflow DAGs and operators
-│   ├── dags/                        # DAG definitions
-│   │   ├── dataset_upload_dag.py
-│   │   ├── dataset_validation_dag.py
-│   │   └── dataset_cleanup_dag.py
-│   ├── operators/                   # Custom operators
-│   │   ├── dataset_operator.py
-│   │   └── validation_operator.py
-│   └── config/                      # Airflow configuration
-│       └── airflow.cfg
-│
-├── kafka/                           # Kafka consumers and producers
-│   ├── __init__.py
-│   ├── producers/
-│   │   ├── __init__.py
-│   │   └── dataset_event_producer.py
-│   └── consumers/
-│       ├── __init__.py
-│       └── dataset_event_consumer.py
-│
-├── scripts/                         # Utility scripts
-│   ├── init_cassandra.py            # Initialize Cassandra schema
-│   ├── seed_data.py                 # Seed test data
-│   └── migrate.py                   # Database migrations
-│
-├── tests/                           # Test suite
-│   ├── __init__.py
-│   ├── conftest.py                  # Pytest fixtures
-│   ├── unit/                        # Unit tests
-│   │   ├── test_masking.py
-│   │   ├── test_validators.py
-│   │   └── test_services.py
-│   ├── integration/                 # Integration tests
-│   │   ├── test_api_datasets.py
-│   │   ├── test_api_rows.py
-│   │   └── test_etl_pipeline.py
-│   └── e2e/                         # End-to-end tests
-│       └── test_full_workflow.py
-│
-└── frontend/                        # React frontend (Phase 2)
-    ├── package.json
-    ├── tsconfig.json
-    ├── public/
-    └── src/
-        ├── components/              # React components
-        ├── pages/                   # Page components
-        ├── services/                # API client services
-        ├── store/                   # Redux store
-        └── App.tsx
+dataset-manager/                          # Backend (Python/FastAPI)
+├── app/
+│   ├── main.py                           # Application entry & middleware
+│   ├── auth_utils.py                     # Auth & JWT utilities
+│   ├── cassandra_client.py               # Database singleton
+│   ├── api/                              # Endpoint handlers
+│   │   ├── auth.py, datasets.py, rows.py, permissions.py
+│   ├── core/                             # Config, exceptions, masking engine
+│   ├── services/                         # Business logic (Dataset, Permission, Cache)
+│   ├── integrations/                     # Kafka, Redis, S3, Storage Factory
+│   └── monitoring/                       # Prometheus & Grafana
+├── airflow/                              # ETL DAGs
+├── scripts/                              # Initialization & utility scripts
+├── tests/                                # Unit, Integration, Benchmarks
+└── docker-compose.yml                    # Multi-service orchestration
+
+frontend/                                 # Frontend (Vite/React/TS)
+├── src/
+│   ├── api/                              # Axios client & API definitions
+│   ├── components/                       # Layout & Common components
+│   ├── pages/                            # Auth, Datasets, Admin pages
+│   ├── store/                            # Redux Toolkit slices
+│   ├── theme/                            # MUI v7 styling
+│   └── types/                            # TypeScript interfaces
+├── package.json
+└── tsconfig.json
 ```
 
 ---
 
 ## Implementation Priorities
 
-### Phase 1: Core Infrastructure (Weeks 1-2)
+### Phase 1: Core Infrastructure (Weeks 1-2) [COMPLETED]
 **Goal**: Set up foundational backend infrastructure
 
 #### Tasks
@@ -1316,14 +1268,14 @@ dataset-manager/
    - Set up CORS configuration
 
 **Deliverables**:
-- ✅ FastAPI app running locally
-- ✅ Cassandra connected and schema initialized
-- ✅ JWT authentication working
-- ✅ Health check endpoint responding
+- [x] FastAPI app running locally
+- [x] Cassandra connected and schema initialized
+- [x] JWT authentication working
+- [x] Health check endpoint responding
 
 ---
 
-### Phase 2: Dataset Management (Weeks 3-4)
+### Phase 2: Dataset Management (Weeks 3-4) [COMPLETED]
 **Goal**: Implement core dataset upload and metadata management
 
 #### Tasks
@@ -1352,14 +1304,14 @@ dataset-manager/
    - Optimize search queries with caching
 
 **Deliverables**:
-- ✅ Upload dataset endpoint working
-- ✅ List/search datasets with pagination
-- ✅ Get dataset metadata endpoint
-- ✅ Update/delete dataset endpoints with permission checks
+- [x] Upload dataset endpoint working
+- [x] List/search datasets with pagination
+- [x] Get dataset metadata endpoint
+- [x] Update/delete dataset endpoints with permission checks
 
 ---
 
-### Phase 3: Data Access & Masking (Weeks 5-6)
+### Phase 3: Data Access & Masking (Weeks 5-6) [COMPLETED]
 **Goal**: Enable data querying with role-based masking
 
 #### Tasks
@@ -1388,14 +1340,14 @@ dataset-manager/
    - Stream large files efficiently
 
 **Deliverables**:
-- ✅ Get rows endpoint with pagination and masking
-- ✅ Download dataset with format conversion
-- ✅ Masking rules applied correctly per role
-- ✅ Performance tested with 1M+ row datasets
+- [x] Get rows endpoint with pagination and masking
+- [x] Download dataset with format conversion
+- [x] Masking rules applied correctly per role
+- [x] Performance tested with 1M+ row datasets
 
 ---
 
-### Phase 4: ETL Pipeline (Weeks 7-8)
+### Phase 4: ETL Pipeline (Weeks 7-8) [COMPLETED]
 **Goal**: Build automated ETL for dataset processing
 
 #### Tasks
@@ -1424,14 +1376,14 @@ dataset-manager/
    - Handle partial failures with rollback
 
 **Deliverables**:
-- ✅ Airflow DAG triggered on dataset upload
-- ✅ Validation, transformation, loading stages complete
-- ✅ ETL job status tracked and queryable
-- ✅ Error handling and retry logic implemented
+- [x] Airflow DAG triggered on dataset upload
+- [x] Validation, transformation, loading stages complete
+- [x] ETL job status tracked and queryable
+- [x] Error handling and retry logic implemented
 
 ---
 
-### Phase 5: Middleware & Messaging (Weeks 9-10)
+### Phase 5: Middleware & Messaging (Weeks 9-10) [COMPLETED]
 **Goal**: Add async processing with Kafka and middleware
 
 #### Tasks
@@ -1460,14 +1412,14 @@ dataset-manager/
    - Create audit log query endpoints
 
 **Deliverables**:
-- ✅ Kafka integrated for async processing
-- ✅ Upload events trigger ETL via Kafka
-- ✅ Rate limiting active on all endpoints
-- ✅ Audit logs captured and queryable
+- [x] Kafka integrated for async processing
+- [x] Upload events trigger ETL via Kafka
+- [x] Rate limiting active on all endpoints
+- [x] Audit logs captured and queryable
 
 ---
 
-### Phase 6: Cloud Storage & Scalability (Weeks 11-12)
+### Phase 6: Cloud Storage & Scalability (Weeks 11-12) [COMPLETED]
 **Goal**: Migrate to cloud storage and optimize for scale
 
 #### Tasks
@@ -1496,14 +1448,14 @@ dataset-manager/
    - Implement alerting for failures
 
 **Deliverables**:
-- ✅ Files stored in S3/GCS
-- ✅ Metadata cached in Redis
-- ✅ Prometheus metrics exposed
-- ✅ Grafana dashboards operational
+- [x] Files stored in S3/GCS
+- [x] Metadata cached in Redis
+- [x] Prometheus metrics exposed
+- [x] Grafana dashboards operational
 
 ---
 
-### Phase 7: Frontend Development (Weeks 13-16)
+### Phase 7: Frontend Development (Weeks 13-16) [IN PROGRESS]
 **Goal**: Build React frontend for dataset management
 
 #### Tasks
@@ -1538,15 +1490,38 @@ dataset-manager/
    - Implement dataset deletion with confirmation
 
 **Deliverables**:
-- ✅ React app running locally
-- ✅ Login and registration working
-- ✅ Dataset CRUD operations via UI
-- ✅ Data preview and download functional
-- ✅ Admin pages operational
+- [x] React app running locally (Vite + TS + MUI v7)
+- [x] Login and registration working with JWT persistence
+- [x] Dataset CRUD operations via UI (List, Detail, Upload, Update, Delete)
+- [/] Data preview and analytics functional (Download button in progress)
+- [/] Admin pages operational (Dashboard layout with hardcoded stats)
 
 ---
 
-### Phase 8: Testing & Documentation (Weeks 17-18)
+### Phase 8: Performance & Optimization (Weeks 17-18) [COMPLETED]
+**Goal**: Sub-millisecond pagination and high-throughput ingestion
+
+#### Tasks
+1. **Per-Dataset Table Architecture**
+   - Refactor shared table to dynamic `ds_rows_<uuid>` tables
+   - Implement structured column storage
+
+2. **Redis Pagination Cache**
+   - Implement `PaginationCacheService`
+   - Add automated cache invalidation on data changes
+
+3. **Ingestion Benchmarking**
+   - Add large-scale insert benchmarks (1M+ rows)
+   - Implement Cassandra BatchStatement optimizations
+
+**Deliverables**:
+- [x] Dedicated tables for each dataset
+- [x] Cold read latency <2s, Warm read latency <100ms
+- [x] Batch inserts achieving 100k rows/sec
+
+---
+
+### Phase 9: Testing & Documentation (Weeks 19-20)
 **Goal**: Comprehensive testing and documentation
 
 #### Tasks
@@ -1575,14 +1550,14 @@ dataset-manager/
    - Create user documentation
 
 **Deliverables**:
-- ✅ 80%+ test coverage
-- ✅ All integration tests passing
-- ✅ E2E tests automated
-- ✅ Complete documentation published
+- [/] 80%+ test coverage (Mainly Backend)
+- [/] All integration tests passing (Backend)
+- [ ] E2E tests automated
+- [ ] Complete documentation published
 
 ---
 
-### Phase 9: Production Deployment (Weeks 19-20)
+### Phase 10: Production Deployment (Weeks 21-22)
 **Goal**: Deploy to production environment
 
 #### Tasks
@@ -1611,10 +1586,10 @@ dataset-manager/
    - Create runbooks for operations
 
 **Deliverables**:
-- ✅ Production environment live
-- ✅ All services deployed and healthy
-- ✅ Monitoring and alerting active
-- ✅ CI/CD pipeline operational
+- [ ] Production environment live
+- [ ] All services deployed and healthy
+- [ ] Monitoring and alerting active
+- [ ] CI/CD pipeline operational
 
 ---
 
@@ -2412,9 +2387,10 @@ Closes #123
 
 ## Changelog
 
-| Version | Date | Changes | Author |
-|---------|------|---------|--------|
-| 1.0 | 2025-12-30 | Initial PRD creation with complete specifications | System |
+| Version | Date | Changes | Author |Reviewer|
+|---------|------|---------|--------|--------|
+| 1.0 | 2025-12-30 | Initial PRD creation with complete specifications | System |Krishna Mohan|
+| 2.0 | 2026-02-21 | Added Phase 7-10 features and updated code examples | System |Krishna Mohan|
 
 ---
 
