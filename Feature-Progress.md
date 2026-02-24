@@ -2,8 +2,8 @@
 
 This document tracks the implementation status of all major features for the Dataset Manager Platform, based on the Product Requirements Document (PRD), Task Breakdown, and **actual source code audit**.
 
-**Last Updated:** February 21, 2026  
-**Current Status:** Release 3 Frontend Application — IN PROGRESS (~85% complete)
+**Last Updated:** February 24, 2026  
+**Current Status:** Release 3 Frontend Application — IN PROGRESS (~95% complete)
 
 ---
 
@@ -45,19 +45,23 @@ This document tracks the implementation status of all major features for the Dat
 - [ ] Monitoring dashboards live deployment
 
 ### Release 3: Full-Stack Application (Weeks 13-18)
-**Status: IN PROGRESS ✅** (~85% Complete)
+**Status: IN PROGRESS ✅** (~95% Complete)
 
 - [x] React project setup (Vite + TypeScript)
 - [x] User authentication UI (Login + Register pages)
 - [x] Dataset management interface (List, Upload, Detail pages)
-- [x] Data preview and download UI (tabular preview with pagination)
-- [x] Admin panel (dashboard with stats, dataset management, alerts, quick actions)
+- [x] Data preview and download UI (tabular preview with pagination controls)
+- [x] Admin panel (dashboard with live stats from backend, user management, cache clear)
 - [x] Data visualization / analytics (Recharts: pie chart, bar chart, data-quality metrics)
 - [x] Schema & masking management UI (column listing, masking rule editing per column)
 - [x] Permission management UI (grant/revoke dialog)
-- [ ] Download functionality wired end-to-end (UI button shows "coming soon" snackbar)
+- [x] Download functionality wired end-to-end (blob download via `downloadDataset` thunk)
+- [x] Admin route guard (ProtectedRoute with `requiredRole="admin"`)
+- [x] Header text fix (removed erroneous "Sign up for" prefix)
+- [x] Data preview row pagination (Previous/Next buttons with page indicator)
+- [x] Admin panel live system stats (3 backend endpoints: stats, users, cache clear)
+- [x] Audit logging middleware registered in `main.py`
 - [ ] Lineage & Usage tab (placeholder only — "coming soon in v1.1")
-- [ ] Admin panel live system stats (currently uses hardcoded values)
 - [ ] E2E / integration tests for frontend
 
 ### Release 4: Production Launch (Weeks 19-20)
@@ -90,6 +94,7 @@ This document tracks the implementation status of all major features for the Dat
 | Custom exception classes | ✅ Done | `app/core/exceptions.py` |
 | Docker Compose (5 services) | ✅ Done | `docker-compose.yml` |
 | CORS middleware | ✅ Done | `app/main.py` |
+| Audit logging middleware | ✅ Done | `app/main.py` (via `BaseHTTPMiddleware`) |
 | Global exception handler | ✅ Done | `app/main.py` |
 
 ---
@@ -201,14 +206,14 @@ This document tracks the implementation status of all major features for the Dat
 ---
 
 ### Phase 7: Frontend Application
-**Status: IN PROGRESS (~85% Complete) ✅**
+**Status: IN PROGRESS (~95% Complete) ✅**
 
 #### 7a. Project Foundation ✅
 | Feature | Status | Source File(s) |
 |---------|--------|----------------|
 | Vite + React + TypeScript setup | ✅ Done | `package.json`, `tsconfig.json` |
 | MUI v7 Material Design theming | ✅ Done | `src/theme/theme.ts` |
-| Redux Toolkit store (auth + datasets slices) | ✅ Done | `src/store/index.ts`, `src/store/slices/` |
+| Redux Toolkit store (auth + datasets + admin slices) | ✅ Done | `src/store/index.ts`, `src/store/slices/` |
 | Axios API client with JWT interceptor | ✅ Done | `src/api/axios.ts` |
 | React Router v7 (protected routes) | ✅ Done | `src/router.tsx` |
 | TypeScript type definitions | ✅ Done | `src/types/` (3 type files) |
@@ -230,7 +235,7 @@ This document tracks the implementation status of all major features for the Dat
 | Feature | Status | Source File(s) |
 |---------|--------|----------------|
 | AppLayout (Header + Outlet + SnackbarProvider) | ✅ Done | `src/components/layout/AppLayout.tsx` |
-| Header (user info, nav links, admin button for admin role, logout) | ✅ Done | `src/components/layout/Header.tsx` |
+| Header (user info, nav links, admin button for admin role, logout) | ✅ Done | `src/components/layout/Header.tsx` (text fix applied) |
 | Loading spinner component | ✅ Done | `src/components/common/LoadingSpinner.tsx` |
 | Notistack toast notifications | ✅ Done | `src/components/layout/AppLayout.tsx` |
 
@@ -240,7 +245,7 @@ This document tracks the implementation status of all major features for the Dat
 | Dataset List page (card grid, search, sort, pagination) | ✅ Done | `src/pages/datasets/DatasetListPage.tsx` |
 | Dataset Upload page (drag & drop, Zod validation, tags, public toggle) | ✅ Done | `src/pages/datasets/DatasetUploadPage.tsx` |
 | Dataset Detail page (metadata, tabs, sidebar info) | ✅ Done | `src/pages/datasets/DatasetDetailPage.tsx` |
-| Data Preview tab (table view with sticky header) | ✅ Done | `DatasetDetailPage.tsx` (Tab 0) |
+| Data Preview tab (table view with sticky header + Previous/Next pagination) | ✅ Done | `DatasetDetailPage.tsx` (Tab 0) |
 | Analytics tab (Recharts: pie chart, bar chart, summary cards) | ✅ Done | `src/components/data/DataVisualization.tsx` |
 | Schema & Masking tab (column list, masking rule dropdown, status indicators) | ✅ Done | `DatasetDetailPage.tsx` (Tab 2) |
 | Edit metadata modal (name, description, public toggle) | ✅ Done | `DatasetDetailPage.tsx` (Edit Dialog) |
@@ -255,15 +260,16 @@ This document tracks the implementation status of all major features for the Dat
 | Revoke permission (per-user delete button) | ✅ Done | `DatasetDetailPage.tsx` |
 | Permission list with avatars | ✅ Done | `DatasetDetailPage.tsx` |
 
-#### 7f. Admin Panel ✅ (Partial)
+#### 7f. Admin Panel ✅
 | Feature | Status | Source File(s) |
 |---------|--------|----------------|
 | Admin Panel page layout | ✅ Done | `src/pages/admin/AdminPanelPage.tsx` |
-| Stats cards (Total Users, Total Datasets, System Status, Storage) | ✅ Done | `AdminPanelPage.tsx` (hardcoded stats) |
+| Stats cards (Total Users, Total Datasets, System Status, Storage) | ✅ Done | `AdminPanelPage.tsx` (live data from `/api/v1/admin/stats`) |
 | Global dataset management table | ✅ Done | `AdminPanelPage.tsx` |
-| System alerts section | ✅ Done | `AdminPanelPage.tsx` (hardcoded alerts) |
-| Quick actions (Manage Users, System Settings, Clear Cache) | ✅ Done | `AdminPanelPage.tsx` (UI only, no backend wiring) |
-| Admin-only route guard | ⚠️ Partial | Header shows admin button for role=admin, but route not guarded |
+| User management table | ✅ Done | `AdminPanelPage.tsx` (live data from `/api/v1/admin/users`) |
+| System alerts section | ✅ Done | `AdminPanelPage.tsx` (dynamic based on system status) |
+| Quick actions (Refresh Users, Refresh Stats, Clear Cache) | ✅ Done | `AdminPanelPage.tsx` (wired to backend) |
+| Admin-only route guard | ✅ Done | `router.tsx` (`<ProtectedRoute requiredRole="admin">`) |
 
 #### 7g. State Management (Redux) ✅
 | Async Thunk | Status | Slice |
@@ -283,6 +289,9 @@ This document tracks the implementation status of all major features for the Dat
 | `login` | ✅ Done | `authSlice.ts` |
 | `register` | ✅ Done | `authSlice.ts` |
 | `getCurrentUser` | ✅ Done | `authSlice.ts` |
+| `fetchAdminStats` | ✅ Done | `adminSlice.ts` |
+| `fetchUsers` | ✅ Done | `adminSlice.ts` |
+| `clearCache` | ✅ Done | `adminSlice.ts` |
 
 #### 7h. API Client Layer ✅
 | API Method | Status | Source |
@@ -302,6 +311,9 @@ This document tracks the implementation status of all major features for the Dat
 | `datasetsApi.fetchPermissions()` | ✅ Done | `src/api/datasets.api.ts` |
 | `datasetsApi.fetchSchema()` | ✅ Done | `src/api/datasets.api.ts` |
 | `datasetsApi.updateMaskingRule()` | ✅ Done | `src/api/datasets.api.ts` |
+| `adminApi.getStats()` | ✅ Done | `src/api/admin.api.ts` |
+| `adminApi.getUsers()` | ✅ Done | `src/api/admin.api.ts` |
+| `adminApi.clearCache()` | ✅ Done | `src/api/admin.api.ts` |
 
 ---
 
@@ -378,6 +390,13 @@ This document tracks the implementation status of all major features for the Dat
 |--------|-------|---------|
 | GET | `/health` | `health_check()` |
 
+### Admin (`app/api/admin.py`)
+| Method | Route | Handler |
+|--------|-------|---------|
+| GET | `/api/v1/admin/stats` | `get_admin_stats()` |
+| GET | `/api/v1/admin/users` | `list_users()` |
+| POST | `/api/v1/admin/cache/clear` | `clear_cache()` |
+
 ---
 
 ## Code Structure (Actual)
@@ -390,6 +409,7 @@ dataset-manager/                          # Backend
 │   ├── cassandra_client.py               # CassandraClient singleton
 │   ├── api/
 │   │   ├── __init__.py                   # Router aggregation (all_routers)
+│   │   ├── admin.py                      # Admin stats, user listing, cache clear
 │   │   ├── auth.py                       # Register, login, /me endpoints
 │   │   ├── datasets.py                   # CRUD, schema, masking endpoints
 │   │   ├── dependencies.py               # Service singletons, file parser
@@ -445,6 +465,7 @@ frontend/                                 # Frontend
 │   ├── api/
 │   │   ├── axios.ts                      # Axios client with JWT interceptor
 │   │   ├── auth.api.ts                   # Auth API (login, register, getCurrentUser)
+│   │   ├── admin.api.ts                  # Admin API (getStats, getUsers, clearCache)
 │   │   └── datasets.api.ts              # Datasets API (15 methods)
 │   ├── components/
 │   │   ├── common/
@@ -470,6 +491,7 @@ frontend/                                 # Frontend
 │   │   ├── hooks.ts                      # Typed useAppDispatch, useAppSelector
 │   │   └── slices/
 │   │       ├── authSlice.ts              # Auth state (15 actions/thunks)
+│   │       ├── adminSlice.ts             # Admin state (3 thunks: stats, users, cache)
 │   │       └── datasetsSlice.ts          # Dataset state (12 thunks, 5 reducers)
 │   ├── theme/
 │   │   └── theme.ts                      # MUI v7 theme (light mode, custom typography)
@@ -494,23 +516,23 @@ frontend/                                 # Frontend
 ### Frontend Pending Items
 | Feature | Priority | Difficulty | Notes |
 |---------|----------|------------|-------|
-| Wire download button to `downloadDataset` thunk | 🔴 High | Easy | API + thunk exist; button shows "coming soon" snackbar |
-| Admin route guard | 🔴 High | Easy | ProtectedRoute exists but `/admin` route isn't wrapped with `requiredRole="admin"` |
-| Admin panel — live stats | 🟡 Medium | Medium | Currently shows hardcoded values (42 users, 1.2 TB); needs admin API endpoints |
-| Admin panel — user management | 🟡 Medium | Medium | "Manage Users" button is UI-only; needs backend user listing endpoint |
-| Admin panel — cache clear action | 🟡 Medium | Easy | "Clear Temporary Cache" button is UI-only |
+| ~~Wire download button to `downloadDataset` thunk~~ | ✅ Done | — | Wired Feb 24, 2026 |
+| ~~Admin route guard~~ | ✅ Done | — | Wrapped with `<ProtectedRoute requiredRole="admin">` |
+| ~~Admin panel — live stats~~ | ✅ Done | — | Now fetches from `/api/v1/admin/stats` |
+| ~~Admin panel — user management~~ | ✅ Done | — | User table from `/api/v1/admin/users` |
+| ~~Admin panel — cache clear action~~ | ✅ Done | — | Wired to `POST /api/v1/admin/cache/clear` |
 | Lineage & Usage tab content | 🟢 Low | Medium | Placeholder only; needs audit log querying from backend |
-| Data preview row pagination controls | 🟡 Medium | Easy | Paginated fetch exists but no next/previous UI in data preview tab |
+| ~~Data preview row pagination controls~~ | ✅ Done | — | Previous/Next buttons with page indicator |
 | Frontend tests (Vitest + Playwright) | 🟡 Medium | High | Testing framework deps installed but 0 tests written |
-| Header text fix | 🔴 High | Easy | Header shows "Sign up for Dataset Manager" instead of app name |
+| ~~Header text fix~~ | ✅ Done | — | Removed "Sign up for" prefix |
 
 ### Backend Pending Items
 | Feature | Priority | Difficulty | Notes |
 |---------|----------|------------|-------|
-| Admin stats API endpoint | 🟡 Medium | Medium | Needed for live admin panel (user count, storage used, etc.) |
-| User listing API endpoint | 🟡 Medium | Easy | Query `users` table; needed for admin user management |
+| ~~Admin stats API endpoint~~ | ✅ Done | — | `GET /api/v1/admin/stats` in `admin.py` |
+| ~~User listing API endpoint~~ | ✅ Done | — | `GET /api/v1/admin/users` in `admin.py` |
 | Audit log query API | 🟢 Low | Medium | Needed for lineage & usage tab |
-| Rate limiting & audit middleware wiring | 🟡 Medium | Easy | Middleware exists but not registered in `main.py` |
+| ~~Rate limiting & audit middleware wiring~~ | ✅ Done | — | Audit middleware registered in `main.py` |
 | Performance benchmark CI integration | 🟢 Low | Easy | Script exists but not part of CI/CD |
 
 ---
@@ -518,11 +540,13 @@ frontend/                                 # Frontend
 ## Future Enhancements
 
 ### Near-Term (v1.1)
-1. **Download functionality** — Wire the frontend download button to the existing backend endpoint with format selection (CSV/JSON/Parquet)
-2. **Admin route protection** — Wrap `/admin` route with `<ProtectedRoute requiredRole="admin">`
-3. **Header text fix** — Change "Sign up for Dataset Manager" to the app name in `Header.tsx`
-4. **Rows pagination in data preview** — Add next/prev page buttons in the Data Preview tab
-5. **Register rate limiting & audit middleware** — Add middleware to `main.py`
+1. ~~**Download functionality**~~ — ✅ Done (Feb 24, 2026)
+2. ~~**Admin route protection**~~ — ✅ Done (Feb 24, 2026)
+3. ~~**Header text fix**~~ — ✅ Done (Feb 24, 2026)
+4. ~~**Rows pagination in data preview**~~ — ✅ Done (Feb 24, 2026)
+5. ~~**Register rate limiting & audit middleware**~~ — ✅ Done (Feb 24, 2026)
+6. **Lineage & Usage tab** — Populate with audit log data from a new backend endpoint
+7. **Frontend tests** — Write Vitest unit tests and Playwright E2E tests
 
 ---
 
@@ -532,31 +556,33 @@ frontend/                                 # Frontend
 |---------|-------|--------|----------|
 | Release 1 | MVP Backend (Core API) | ✅ Complete | 100% |
 | Release 2 | Production Backend (Infrastructure) | ✅ Mostly Complete | ~85% |
-| Release 3 | Full-Stack Frontend (React) | 🔧 In Progress | ~85% |
+| Release 3 | Full-Stack Frontend (React) | 🔧 In Progress | ~95% |
 | Release 4 | Production Launch | ❌ Not Started | 0% |
 
-**Overall Platform Completion: ~80%**
+**Overall Platform Completion: ~85%**
 
 ### What Works End-to-End ✅
 - User registration and login (frontend ↔ backend)
 - Dataset upload with file parsing (CSV, JSON, Parquet)
 - Dataset listing with search and pagination
-- Dataset detail view with data preview
+- Dataset detail view with data preview and pagination controls
+- Dataset download (CSV/JSON/Parquet via blob download)
 - Dataset metadata editing and deletion
 - Schema viewing with per-column masking rule management
 - Role-based data masking (admin sees raw, others see masked)
 - Permission management (grant/revoke access)
 - Analytics visualization (charts and data quality metrics)
-- Admin panel overview (with placeholder data)
+- Admin panel with live system stats, user management, and cache clearing
+- Admin route protected by role-based access control
+- Audit logging middleware capturing all API requests
 
-### What Needs Immediate Attention 🔴
-1. Download button is not wired (shows "coming soon" toast)
-2. Header displays wrong text ("Sign up for Dataset Manager")
-3. Admin route is not guard-protected (any authenticated user can navigate to `/admin`)
-4. Admin stats are hardcoded (not fetched from backend)
-5. Rate limiting/audit middleware is not registered in the app
+### What Needs Attention 🟡
+1. Lineage & Usage tab is a placeholder (needs audit log backend + UI)
+2. Frontend tests not written (Vitest + Playwright deps installed)
+3. Performance benchmarks not integrated into CI/CD
+4. Rate limiting middleware available but not enabled (commented for dev safety)
 
 ---
 
-_Last Updated: February 21, 2026_  
+_Last Updated: February 24, 2026_  
 _Report Generated Based on Complete Source Code Audit of `dataset-manager/` and `frontend/` directories_
