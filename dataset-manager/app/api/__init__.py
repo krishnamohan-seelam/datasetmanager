@@ -7,6 +7,7 @@ from app.api.auth import router as auth_router
 from app.api.datasets import router as datasets_router
 from app.api.rows import router as rows_router
 from app.api.permissions import router as permissions_router
+from app.api.admin import router as admin_router
 
 all_routers = [
     health_router,
@@ -14,4 +15,5 @@ all_routers = [
     datasets_router,
     rows_router,
     permissions_router,
+    admin_router,
 ]

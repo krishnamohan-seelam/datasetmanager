@@ -58,11 +58,13 @@ import {
     clearCurrentDataset,
     updateDataset,
     deleteDataset,
+    downloadDataset,
     fetchPermissions,
     grantPermission,
     revokePermission,
     fetchSchema,
     updateMaskingRule,
+    setRowsPagination,
 } from '../../store/slices/datasetsSlice';
 import { useSnackbar } from 'notistack';
 import LoadingSpinner from '../../components/common/LoadingSpinner';
@@ -321,7 +323,23 @@ const DatasetDetailPage: React.FC = () => {
                         <Button
                             variant="contained"
                             startIcon={<DownloadIcon />}
-                            onClick={() => enqueueSnackbar('Download functionality coming soon', { variant: 'info' })}
+                            onClick={async () => {
+                                if (!id) return;
+                                try {
+                                    const result = await dispatch(downloadDataset({ id, format: (currentDataset?.file_format as 'csv' | 'json' | 'parquet') || 'csv' })).unwrap();
+                                    const url = window.URL.createObjectURL(result.blob);
+                                    const a = document.createElement('a');
+                                    a.href = url;
+                                    a.download = `${currentDataset?.name || 'dataset'}.${result.format}`;
+                                    document.body.appendChild(a);
+                                    a.click();
+                                    a.remove();
+                                    window.URL.revokeObjectURL(url);
+                                    enqueueSnackbar('Download started', { variant: 'success' });
+                                } catch (err: any) {
+                                    enqueueSnackbar(err || 'Download failed', { variant: 'error' });
+                                }
+                            }}
                         >
                             Download
                         </Button>
@@ -346,30 +364,65 @@ const DatasetDetailPage: React.FC = () => {
 
                         <TabPanel value={tabValue} index={0}>
                             {(currentDatasetRows?.length || 0) > 0 ? (
-                                <TableContainer sx={{ maxHeight: 600 }}>
-                                    <Table stickyHeader size="small">
-                                        <TableHead>
-                                            <TableRow>
-                                                {columns.map((col) => (
-                                                    <TableCell key={col} sx={{ fontWeight: 'bold' }}>
-                                                        {col}
-                                                    </TableCell>
-                                                ))}
-                                            </TableRow>
-                                        </TableHead>
-                                        <TableBody>
-                                            {currentDatasetRows.map((row, idx) => (
-                                                <TableRow key={idx} hover>
+                                <>
+                                    <TableContainer sx={{ maxHeight: 600 }}>
+                                        <Table stickyHeader size="small">
+                                            <TableHead>
+                                                <TableRow>
                                                     {columns.map((col) => (
-                                                        <TableCell key={`${idx}-${col}`}>
-                                                            {String(row[col])}
+                                                        <TableCell key={col} sx={{ fontWeight: 'bold' }}>
+                                                            {col}
                                                         </TableCell>
                                                     ))}
                                                 </TableRow>
-                                            ))}
-                                        </TableBody>
-                                    </Table>
-                                </TableContainer>
+                                            </TableHead>
+                                            <TableBody>
+                                                {currentDatasetRows.map((row, idx) => (
+                                                    <TableRow key={idx} hover>
+                                                        {columns.map((col) => (
+                                                            <TableCell key={`${idx}-${col}`}>
+                                                                {String(row[col])}
+                                                            </TableCell>
+                                                        ))}
+                                                    </TableRow>
+                                                ))}
+                                            </TableBody>
+                                        </Table>
+                                    </TableContainer>
+                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 2, px: 1 }}>
+                                        <Typography variant="body2" color="text.secondary">
+                                            Page {rowsPagination.page} of {rowsPagination.pages || 1} ({rowsPagination.total.toLocaleString()} rows)
+                                        </Typography>
+                                        <Stack direction="row" spacing={1}>
+                                            <Button
+                                                size="small"
+                                                variant="outlined"
+                                                disabled={rowsPagination.page <= 1}
+                                                onClick={() => {
+                                                    if (!id) return;
+                                                    const newPage = rowsPagination.page - 1;
+                                                    dispatch(setRowsPagination({ page: newPage }));
+                                                    dispatch(fetchDatasetRows({ datasetId: id, params: { ...rowsPagination, page: newPage } }));
+                                                }}
+                                            >
+                                                Previous
+                                            </Button>
+                                            <Button
+                                                size="small"
+                                                variant="outlined"
+                                                disabled={rowsPagination.page >= (rowsPagination.pages || 1)}
+                                                onClick={() => {
+                                                    if (!id) return;
+                                                    const newPage = rowsPagination.page + 1;
+                                                    dispatch(setRowsPagination({ page: newPage }));
+                                                    dispatch(fetchDatasetRows({ datasetId: id, params: { ...rowsPagination, page: newPage } }));
+                                                }}
+                                            >
+                                                Next
+                                            </Button>
+                                        </Stack>
+                                    </Box>
+                                </>
                             ) : (
                                 <Box sx={{ py: 8, textAlign: 'center' }}>
                                     <Typography color="text.secondary">

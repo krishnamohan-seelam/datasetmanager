@@ -22,7 +22,7 @@ const Header = () => {
                     sx={{ flexGrow: 1, cursor: 'pointer' }}
                     onClick={() => navigate('/')}
                 >
-                    Sign up for {import.meta.env.VITE_APP_NAME as string || 'Dataset Manager'}
+                    {import.meta.env.VITE_APP_NAME as string || 'Dataset Manager'}
                 </Typography>
 
                 {isAuthenticated && user && (
