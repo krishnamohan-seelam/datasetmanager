@@ -51,7 +51,7 @@ services:
     volumes:
       - cassandra_data:/var/lib/cassandra
     healthcheck:
-      test: [ "CMD-SHELL", "nodetool status | grep -E '^UN\\s+' || exit 1" ]
+      test: ["CMD-SHELL", "nodetool status | grep -E '^UN\\s+' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -80,10 +80,35 @@ services:
     volumes:
       - minio_data:/data
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 30s
       timeout: 20s
       retries: 3
+    networks:
+      - dataset-net
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - dataset-net
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000" # Use 3001 as 3000 might be used or standard
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
     networks:
       - dataset-net
 
@@ -95,3 +120,4 @@ volumes:
   minio_data:
   cassandra_data:
   redis_data:
+  grafana_data:

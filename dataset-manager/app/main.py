@@ -73,8 +73,13 @@ app.add_middleware(BaseHTTPMiddleware, dispatch=audit_logging_middleware)
 # app.add_middleware(BaseHTTPMiddleware, dispatch=_rate_limit_dispatch)
 
 
-# ---------------------------------------------------------------------------
+from prometheus_client import make_asgi_app
+from app.monitoring.metrics import registry
+
 # Register routers
-# ---------------------------------------------------------------------------
 for router in all_routers:
     app.include_router(router)
+
+# Add prometheus metrics endpoint
+metrics_app = make_asgi_app(registry=registry)
+app.mount("/metrics", metrics_app)

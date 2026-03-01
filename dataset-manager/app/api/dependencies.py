@@ -17,6 +17,8 @@ from app.core.config import settings
 from app.core.exceptions import InvalidFileFormatException
 from app.services.dataset_service import DatasetService
 from app.services.permission_service import PermissionService
+from app.services.schema_service import SchemaService
+from app.services.batch_service import BatchService
 from app.utils.log_formatter import app_logger
 
 # Logger
@@ -25,6 +27,8 @@ logger = app_logger
 # Service singletons
 dataset_service = DatasetService()
 permission_service = PermissionService()
+schema_service = SchemaService()
+batch_service = BatchService()
 
 # Database client (used directly for auth queries)
 db = CassandraClient([settings.CASSANDRA_HOST], settings.CASSANDRA_PORT)

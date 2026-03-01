@@ -1,5 +1,7 @@
 // Dataset types
 
+export type BatchFrequency = 'once' | 'hourly' | 'daily' | 'weekly' | 'monthly';
+
 export interface Dataset {
     id: string;
     name: string;
@@ -18,6 +20,11 @@ export interface Dataset {
     schema?: DatasetColumn[];
     statistics?: DatasetStatistics;
     permissions?: DatasetPermissions;
+    // Batch & schema tracking
+    batch_frequency: BatchFrequency;
+    latest_batch_date?: string;
+    total_batches: number;
+    schema_version: number;
 }
 
 export interface DatasetColumn {
@@ -27,6 +34,7 @@ export interface DatasetColumn {
     masked: boolean;
     mask_rule?: string;
     position: number;
+    is_active: boolean;
 }
 
 export interface DatasetStatistics {
@@ -65,8 +73,35 @@ export interface DatasetUploadData {
     tags?: string[];
     is_public?: boolean;
     masking_config?: Record<string, string>;
+    batch_frequency?: BatchFrequency;
+    batch_date?: string;
 }
 
 export interface DatasetRow {
     [key: string]: any;
+}
+
+// Batch types
+
+export interface Batch {
+    batch_id: string;
+    batch_date: string;
+    schema_version: number;
+    row_count: number;
+    size_bytes: number;
+    file_format: string;
+    status: string;
+    uploaded_by: string;
+    created_at: string;
+}
+
+// Schema version types
+
+export interface SchemaVersion {
+    version: number;
+    batch_id?: string;
+    created_at?: string;
+    column_count: number;
+    change_summary?: string;
+    columns?: DatasetColumn[];
 }

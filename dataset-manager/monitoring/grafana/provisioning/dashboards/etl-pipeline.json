@@ -1,0 +1,110 @@
+{
+  "title": "Dataset Manager - ETL Pipeline",
+  "description": "ETL job execution, throughput, and failure tracking",
+  "timezone": "UTC",
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Active ETL Jobs",
+      "targets": [
+        {
+          "expr": "etl_jobs_active",
+          "legendFormat": "{{dag_id}}"
+        }
+      ],
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 6
+      }
+    },
+    {
+      "id": 2,
+      "title": "ETL Success Rate",
+      "targets": [
+        {
+          "expr": "100 * (etl_jobs_success / etl_jobs_total)",
+          "legendFormat": "Success Rate"
+        }
+      ],
+      "type": "gauge",
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 6
+      }
+    },
+    {
+      "id": 3,
+      "title": "ETL Job Duration",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, etl_duration_seconds_bucket)",
+          "legendFormat": "p95 - {{dag_id}}"
+        }
+      ],
+      "type": "graph",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 4,
+      "title": "Rows Processed Per Minute",
+      "targets": [
+        {
+          "expr": "rate(etl_rows_processed[1m])",
+          "legendFormat": "{{dag_id}}"
+        }
+      ],
+      "type": "graph",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 5,
+      "title": "ETL Failure Breakdown",
+      "targets": [
+        {
+          "expr": "etl_jobs_failed",
+          "legendFormat": "{{reason}}"
+        }
+      ],
+      "type": "piechart",
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 6,
+      "title": "Data Quality Score",
+      "targets": [
+        {
+          "expr": "etl_data_quality_score",
+          "legendFormat": "{{dataset_id}}"
+        }
+      ],
+      "type": "graph",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 24,
+        "h": 8
+      }
+    }
+  ]
+}

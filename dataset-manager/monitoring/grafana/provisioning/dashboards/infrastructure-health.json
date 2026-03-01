@@ -1,0 +1,118 @@
+{
+  "title": "Dataset Manager - Infrastructure Health",
+  "description": "Database, Cache, Storage, and Message Queue health",
+  "timezone": "UTC",
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Cassandra Connection Pool",
+      "targets": [
+        {
+          "expr": "cassandra_connection_pool_size",
+          "legendFormat": "{{pool_name}}"
+        },
+        {
+          "expr": "cassandra_connection_active",
+          "legendFormat": "Active - {{pool_name}}"
+        }
+      ],
+      "type": "graph",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 2,
+      "title": "Redis Connection Status",
+      "targets": [
+        {
+          "expr": "redis_connected_clients",
+          "legendFormat": "Connected Clients"
+        },
+        {
+          "expr": "redis_used_memory_bytes",
+          "legendFormat": "Memory Used"
+        }
+      ],
+      "type": "graph",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 3,
+      "title": "Cache Hit Ratio",
+      "targets": [
+        {
+          "expr": "cache_hits / (cache_hits + cache_misses)",
+          "legendFormat": "Hit Ratio"
+        }
+      ],
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 8,
+        "h": 6
+      }
+    },
+    {
+      "id": 4,
+      "title": "S3/MinIO Operations",
+      "targets": [
+        {
+          "expr": "rate(s3_operations_total[5m])",
+          "legendFormat": "{{operation}}"
+        }
+      ],
+      "type": "graph",
+      "gridPos": {
+        "x": 8,
+        "y": 8,
+        "w": 16,
+        "h": 8
+      }
+    },
+    {
+      "id": 5,
+      "title": "Kafka Consumer Lag",
+      "targets": [
+        {
+          "expr": "kafka_consumer_lag",
+          "legendFormat": "{{topic}} - {{partition}}"
+        }
+      ],
+      "type": "graph",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 6,
+      "title": "Kafka Message Throughput",
+      "targets": [
+        {
+          "expr": "rate(kafka_messages_total[5m])",
+          "legendFormat": "{{topic}}"
+        }
+      ],
+      "type": "graph",
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      }
+    }
+  ]
+}

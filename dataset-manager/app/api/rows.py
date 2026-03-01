@@ -23,9 +23,10 @@ async def get_dataset_rows(
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=1000),
     columns: Optional[str] = Query(None, description="Comma-separated column names to select"),
+    batch_id: Optional[uuid.UUID] = Query(None, description="Filter by specific batch"),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get paginated rows from dataset"""
+    """Get paginated rows from dataset. Optionally filter by batch_id."""
     try:
         dataset = dataset_service.get_dataset(dataset_id)
 
@@ -50,12 +51,16 @@ async def get_dataset_rows(
             page_size,
             current_user["role"],
             columns=column_list,
+            batch_id=batch_id,
         )
+
+        pages = (total + page_size - 1) // page_size if total > 0 else 1
 
         return RowsResponse(
             total=total,
             page=page,
             page_size=page_size,
+            pages=pages,
             items=rows,
         )
     except DatasetNotFoundException:

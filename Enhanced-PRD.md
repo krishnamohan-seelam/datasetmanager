@@ -5,8 +5,8 @@ copilot-context: prd
 
 # Product Requirements Document: Dataset Manager Platform
 
-**Version:** 2.0  
-**Last Updated:** February 21, 2026  
+**Version:** 3.0  
+**Last Updated:** March 1, 2026  
 **Project Type:** Scalable Backend System for Dataset Management  
 **Technology Stack:** Python, FastAPI, Apache Cassandra, Apache Airflow, React (MUI v7)
 
@@ -168,7 +168,7 @@ Build a scalable backend system for uploading, managing, and sharing large datas
 ### Database Schema (Apache Cassandra)
 
 #### Table: datasets
-**Purpose**: Store dataset metadata
+**Purpose**: Store dataset metadata (includes batch/schema tracking)
 ```cql
 CREATE TABLE datasets (
     dataset_id UUID PRIMARY KEY,
@@ -185,13 +185,18 @@ CREATE TABLE datasets (
     version INT,
     tags SET<TEXT>,
     is_public BOOLEAN,
+    batch_frequency TEXT,     -- 'once', 'hourly', 'daily', 'weekly', 'monthly'
+    latest_batch_id UUID,
+    latest_batch_date TIMESTAMP,
+    total_batches INT,
+    schema_version INT,
     INDEX (owner_email),
     INDEX (name)
 );
 ```
 
 #### Table: dataset_schema
-**Purpose**: Store column metadata and masking rules
+**Purpose**: Store versioned column metadata and masking rules with soft-delete support
 ```cql
 CREATE TABLE dataset_schema (
     dataset_id UUID,
@@ -199,10 +204,46 @@ CREATE TABLE dataset_schema (
     column_type TEXT,
     is_nullable BOOLEAN,
     is_masked BOOLEAN,
-    mask_rule TEXT, -- 'email', 'phone', 'ssn', 'custom:regex'
+    mask_rule TEXT,
     position INT,
+    version INT,          -- Schema version when column was added
+    is_active BOOLEAN,    -- false = soft-deleted (column dropped)
+    added_at TIMESTAMP,
+    removed_at TIMESTAMP, -- Set when is_active becomes false
     PRIMARY KEY (dataset_id, column_name)
 );
+```
+
+#### Table: dataset_schema_versions
+**Purpose**: Track schema version metadata and change summaries
+```cql
+CREATE TABLE dataset_schema_versions (
+    dataset_id UUID,
+    version INT,
+    batch_id UUID,
+    created_at TIMESTAMP,
+    column_count INT,
+    change_summary TEXT,
+    PRIMARY KEY (dataset_id, version)
+) WITH CLUSTERING ORDER BY (version DESC);
+```
+
+#### Table: dataset_batches
+**Purpose**: Track individual data ingestion batches per dataset
+```cql
+CREATE TABLE dataset_batches (
+    dataset_id UUID,
+    batch_id UUID,
+    batch_date TIMESTAMP,
+    schema_version INT,
+    row_count BIGINT,
+    size_bytes BIGINT,
+    file_format TEXT,
+    status TEXT,          -- 'processing', 'ready', 'failed'
+    uploaded_by TEXT,
+    created_at TIMESTAMP,
+    PRIMARY KEY (dataset_id, batch_date, batch_id)
+) WITH CLUSTERING ORDER BY (batch_date DESC, batch_id DESC);
 ```
 
 #### Table: dataset_rows (Legacy Pattern)
@@ -211,17 +252,18 @@ CREATE TABLE dataset_schema (
 
 #### Table: ds_rows_<uuid> (Current Pattern)
 **Purpose**: Dedicated storage for each dataset's rows with structured columns.
-**Partitioning**: By `row_chunk_id` for efficient paginated access.
+**Partitioning**: By `batch_id` + `row_chunk_id` for batch-isolated access.
 ```cql
 CREATE TABLE ds_rows_<dataset_id> (
-    row_chunk_id INT,    -- Partition key (e.g., 0-999, 1000-1999)
+    batch_id UUID,       -- Batch partition key
+    row_chunk_id INT,    -- Chunk partition key
     row_id BIGINT,       -- Clustering key
     -- Dynamic columns based on dataset schema
     col1 TEXT,
     col2 INT,
     col3 DOUBLE,
     ...,
-    PRIMARY KEY (row_chunk_id, row_id)
+    PRIMARY KEY ((batch_id, row_chunk_id), row_id)
 ) WITH CLUSTERING ORDER BY (row_id ASC);
 ```
 
@@ -451,6 +493,8 @@ POST /datasets
 - `tags` (str, optional): Comma-separated tags
 - `is_public` (bool, default=false): Public visibility
 - `masking_config` (json, optional): Column masking configuration
+- `batch_frequency` (str, optional, default='once'): One of `once`, `hourly`, `daily`, `weekly`, `monthly`
+- `batch_date` (str, optional): ISO-8601 datetime for this batch. Defaults to current time.
 
 **Example masking_config**:
 ```json
@@ -466,9 +510,9 @@ POST /datasets
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "name": "customer_demographics_2024",
-  "status": "uploading",
-  "message": "Dataset upload initiated. ETL job queued.",
-  "job_id": "660e8400-e29b-41d4-a716-446655440001"
+  "row_count": 1500000,
+  "status": "ready",
+  "batch_frequency": "daily"
 }
 ```
 
@@ -553,14 +597,73 @@ GET /datasets/{dataset_id}
 
 #### 3.5 Schema & Masking Rules
 ```http
-GET /datasets/{id}/schema
+GET /datasets/{id}/schema?version=N   # Optional version param
+GET /datasets/{id}/schema/history      # List all schema versions
 PATCH /datasets/{id}/schema/{col}/masking
+```
+
+**GET /schema Response** (200 OK):
+```json
+[
+  {
+    "name": "email",
+    "type": "string",
+    "nullable": true,
+    "masked": true,
+    "mask_rule": "email",
+    "position": 1,
+    "is_active": true
+  }
+]
+```
+
+**GET /schema/history Response** (200 OK):
+```json
+[
+  {
+    "version": 2,
+    "batch_id": "...",
+    "created_at": "2026-03-01T10:00:00Z",
+    "column_count": 15,
+    "change_summary": "Added: new_col; Dropped: old_col"
+  }
+]
 ```
 
 **PATCH Body**:
 ```json
 {
   "mask_rule": "email"
+}
+```
+
+---
+
+#### 3.6 Batch Management
+```http
+GET /datasets/{id}/batches                # List all batches (paginated)
+DELETE /datasets/{id}/batches/{batch_id}   # Delete a specific batch
+```
+
+**GET /batches Response** (200 OK):
+```json
+{
+  "total": 12,
+  "page": 1,
+  "page_size": 20,
+  "pages": 1,
+  "items": [
+    {
+      "batch_id": "...",
+      "batch_date": "2026-03-01T00:00:00Z",
+      "schema_version": 2,
+      "row_count": 50000,
+      "size_bytes": 12000000,
+      "status": "ready",
+      "uploaded_by": "user@company.com",
+      "created_at": "2026-03-01T10:30:00Z"
+    }
+  ]
 }
 ```
 
@@ -605,6 +708,7 @@ GET /datasets/{dataset_id}/rows
 **Query Parameters**:
 - `page` (int, default=1): Page number
 - `page_size` (int, default=100, max=1000): Rows per page
+- `batch_id` (uuid, optional): Filter rows by specific batch
 - `filters` (json, optional): Column filters (e.g., `{"age": {"gt": 30}}`)
 - `columns` (str, optional): Comma-separated column names to return
 - `masked` (bool, default=true): Apply masking rules
@@ -799,7 +903,8 @@ GET /health
 
 Each dataset stores:
 - **Basic Info**: name, description, owner, timestamps
-- **Schema Definition**: column names, types, nullability, masking rules
+- **Schema Definition**: versioned column definitions with soft-delete, masking rules
+- **Batch Metadata**: ingestion frequency, batch dates, per-batch row counts
 - **Statistics**: row count, size, null counts, duplicates
 - **Access Control**: role assignments (admin/contributor/viewer)
 - **Lineage**: ETL job history, transformations applied
@@ -1215,11 +1320,18 @@ dataset-manager/                          # Backend (Python/FastAPI)
 │   ├── api/                              # Endpoint handlers
 │   │   ├── auth.py, datasets.py, rows.py, permissions.py
 │   ├── core/                             # Config, exceptions, masking engine
-│   ├── services/                         # Business logic (Dataset, Permission, Cache)
+│   ├── services/
+│   │   ├── dataset_service.py            # Dataset lifecycle (delegates to Schema/Batch)
+│   │   ├── schema_service.py             # Versioned schema CRUD & evolution
+│   │   ├── batch_service.py              # Batch lifecycle management
+│   │   ├── permission_service.py         # RBAC enforcement
+│   │   └── pagination_cache.py           # Redis pagination cache
 │   ├── integrations/                     # Kafka, Redis, S3, Storage Factory
 │   └── monitoring/                       # Prometheus & Grafana
 ├── airflow/                              # ETL DAGs
-├── scripts/                              # Initialization & utility scripts
+├── scripts/
+│   ├── init_cassandra.py                 # DDL init (incl. batch/schema tables)
+│   └── migrate_schema_v3.py             # Migration to versioned schema
 ├── tests/                                # Unit, Integration, Benchmarks
 └── docker-compose.yml                    # Multi-service orchestration
 
@@ -1455,7 +1567,7 @@ frontend/                                 # Frontend (Vite/React/TS)
 
 ---
 
-### Phase 7: Frontend Development (Weeks 13-16) [IN PROGRESS]
+### Phase 7: Frontend Development (Weeks 13-16) [COMPLETED]
 **Goal**: Build React frontend for dataset management
 
 #### Tasks
@@ -1474,16 +1586,23 @@ frontend/                                 # Frontend (Vite/React/TS)
 3. **Dataset Management Pages**
    - Build dataset listing page with search/filters
    - Create dataset detail page
-   - Implement dataset upload form
+   - Implement dataset upload form with batch frequency selector
    - Add dataset editing form
 
 4. **Data Viewing Pages**
-   - Build data preview table with pagination
+   - Build data preview table with pagination and batch filtering
    - Add column sorting and filtering
    - Implement masked data display
    - Create download button with format selection
 
-5. **Admin Pages**
+5. **Batch & Schema Management Pages**
+   - Build Batches tab with paginated batch table
+   - Schema version dropdown for historical schema browsing
+   - Dropped-column visual treatment (strikethrough + opacity)
+   - Batch info sidebar (frequency, total batches, schema version)
+   - Frequency badge on dataset list cards
+
+6. **Admin Pages**
    - Build user management page
    - Create permission management UI
    - Add audit log viewer
@@ -1493,8 +1612,11 @@ frontend/                                 # Frontend (Vite/React/TS)
 - [x] React app running locally (Vite + TS + MUI v7)
 - [x] Login and registration working with JWT persistence
 - [x] Dataset CRUD operations via UI (List, Detail, Upload, Update, Delete)
-- [/] Data preview and analytics functional (Download button in progress)
-- [/] Admin pages operational (Dashboard layout with hardcoded stats)
+- [x] Data preview and analytics functional
+- [x] Admin pages operational
+- [x] Batch management UI (list, delete, paginate)
+- [x] Schema versioning UI (history, version selector)
+- [x] Upload form with ingestion schedule (frequency + batch date)
 
 ---
 
@@ -2391,6 +2513,7 @@ Closes #123
 |---------|------|---------|--------|--------|
 | 1.0 | 2025-12-30 | Initial PRD creation with complete specifications | System |Krishna Mohan|
 | 2.0 | 2026-02-21 | Added Phase 7-10 features and updated code examples | System |Krishna Mohan|
+| 3.0 | 2026-03-01 | Added batch ingestion, schema versioning, batch management endpoints, frontend batch/schema UI | System |Krishna Mohan|
 
 ---
 

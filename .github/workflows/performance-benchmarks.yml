@@ -1,0 +1,73 @@
+name: Performance Benchmarks
+
+on:
+  push:
+    branches: [ main, feature/* ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    
+    services:
+      cassandra:
+        image: cassandra:4.1
+        ports:
+          - 9042:9042
+      redis:
+        image: redis:7.2
+        ports:
+          - 6379:6379
+      minio:
+        image: minio/minio:latest
+        ports:
+          - 9000:9000
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 3
+
+    defaults:
+      run:
+        working-directory: ./dataset-manager
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install poetry
+        poetry install
+
+    - name: Wait for Cassandra
+      run: |
+        until printf "" 2>>/dev/null >>/dev/tcp/localhost/9042; do 
+          sleep 5; 
+          echo "Waiting for Cassandra..."; 
+        done
+
+    - name: Run Performance Benchmarks
+      run: |
+        poetry run pytest tests/performance_benchmarks.py --benchmark-only --benchmark-json benchmark_results.json
+
+    - name: Validate Benchmarks
+      run: |
+        python scripts/validate_benchmarks.py benchmark_results.json
+
+    - name: Upload Benchmark Results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: performance-benchmark-results
+        path: dataset-manager/benchmark_results.json

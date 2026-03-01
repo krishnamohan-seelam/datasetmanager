@@ -4,6 +4,8 @@ import pytest
 from unittest.mock import Mock, patch, MagicMock
 import json
 from datetime import datetime
+import logging
+import sys
 
 # Mock imports for services that might not have full implementations
 pytest_plugins = []
@@ -119,7 +121,7 @@ class TestKafkaProducer:
     def kafka_producer(self):
         from app.integrations.kafka_producer import KafkaEventProducer
 
-        with patch("kafka.KafkaProducer"):
+        with patch("app.integrations.kafka_producer.KafkaProducer"):
             producer = KafkaEventProducer(bootstrap_servers="localhost:9092")
             producer.producer = MagicMock()
             producer.producer.send.return_value.get.return_value = None
@@ -200,6 +202,7 @@ class TestAuditLogger:
 
     def test_log_request(self, caplog):
         """Test request logging"""
+        caplog.set_level(logging.INFO)
         from app.middleware.rate_limit_audit import AuditLogger
 
         AuditLogger.log_request(
@@ -216,6 +219,7 @@ class TestAuditLogger:
 
     def test_log_data_access(self, caplog):
         """Test data access logging"""
+        caplog.set_level(logging.INFO)
         from app.middleware.rate_limit_audit import AuditLogger
 
         AuditLogger.log_data_access(
@@ -230,6 +234,7 @@ class TestAuditLogger:
 
     def test_log_permission_change(self, caplog):
         """Test permission change logging"""
+        caplog.set_level(logging.INFO)
         from app.middleware.rate_limit_audit import AuditLogger
 
         AuditLogger.log_permission_change(
@@ -277,6 +282,50 @@ class TestPrometheusMetrics:
 class TestETLPipelineIntegration:
     """Test ETL pipeline integration"""
 
+    @pytest.fixture(autouse=True)
+    def mock_airflow(self):
+        """Mock airflow to avoid import errors when it is not installed"""
+        from types import ModuleType
+        
+        # Create module mocks
+        airflow = ModuleType("airflow")
+        airflow.DAG = MagicMock()
+        
+        operators = ModuleType("airflow.operators")
+        airflow.operators = operators
+        
+        python_op = ModuleType("airflow.operators.python")
+        operators.python = python_op
+        python_op.PythonOperator = MagicMock()
+        
+        bash_op = ModuleType("airflow.operators.bash")
+        operators.bash = bash_op
+        bash_op.BashOperator = MagicMock()
+        
+        utils = ModuleType("airflow.utils")
+        airflow.utils = utils
+        
+        decorators = ModuleType("airflow.utils.decorators")
+        utils.decorators = decorators
+        decorators.apply_defaults = MagicMock()
+        
+        dags = ModuleType("airflow.dags")
+        airflow.dags = dags
+        
+        # Inject into sys.modules
+        mock_modules = {
+            'airflow': airflow,
+            'airflow.operators': operators,
+            'airflow.operators.python': python_op,
+            'airflow.operators.bash': bash_op,
+            'airflow.utils': utils,
+            'airflow.utils.decorators': decorators,
+            'airflow.dags': dags
+        }
+        
+        with patch.dict(sys.modules, mock_modules):
+            yield
+
     def test_etl_dag_validation_stage(self):
         """Test ETL validation stage"""
         # Mock Airflow context
@@ -287,10 +336,19 @@ class TestETLPipelineIntegration:
             "validation_rules": {},
         }
 
-        # Import and test function
-        from airflow.dags.dataset_etl_pipeline import validate_dataset
-
-        result = validate_dataset(**context)
+        # Use importlib to load the module directly from file to bypass package issues
+        import importlib.util
+        import os
+        
+        module_path = os.path.join(os.getcwd(), "airflow", "dags", "dataset_etl_pipeline.py")
+        spec = importlib.util.spec_from_file_location("dataset_etl_pipeline", module_path)
+        module = importlib.util.module_from_spec(spec)
+        
+        # The module import will trigger 'from airflow import DAG'
+        # Our mock_airflow fixture already handles this via sys.modules
+        spec.loader.exec_module(module)
+        
+        result = module.validate_dataset(**context)
 
         assert result["status"] == "passed"
         assert result["dataset_id"] == "dataset-123"
@@ -307,9 +365,15 @@ class TestETLPipelineIntegration:
             {"dataset_id": "dataset-123", "job_id": "job-456"}
         )
 
-        from airflow.dags.dataset_etl_pipeline import transform_dataset
-
-        result = transform_dataset(**context)
+        import importlib.util
+        import os
+        
+        module_path = os.path.join(os.getcwd(), "airflow", "dags", "dataset_etl_pipeline.py")
+        spec = importlib.util.spec_from_file_location("dataset_etl_pipeline", module_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        
+        result = module.transform_dataset(**context)
 
         assert result["status"] == "passed"
         assert "transformation_stage" in result

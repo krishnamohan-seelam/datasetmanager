@@ -3,6 +3,7 @@ Integration tests for API endpoints
 """
 
 import pytest
+from datetime import datetime
 from fastapi.testclient import TestClient
 from app.main import app
 
@@ -17,30 +18,33 @@ class TestAuthEndpoints:
         """Test user registration"""
         response = client.post(
             "/api/v1/auth/register",
-            params={
-                "email": "newuser@example.com",
+            json={
+                "email": f"newuser_{datetime.now().timestamp()}@example.com",
                 "password": "TestPassword123!",
                 "full_name": "New User",
+                "role": "viewer"
             },
         )
         assert response.status_code == 200
-        assert response.json()["email"] == "newuser@example.com"
+        assert response.json()["user"]["email"].startswith("newuser_")
 
     def test_login_user(self):
         """Test user login"""
         # First register
         client.post(
             "/api/v1/auth/register",
-            params={
+            json={
                 "email": "logintest@example.com",
                 "password": "TestPassword123!",
+                "full_name": "Login Test",
+                "role": "viewer"
             },
         )
 
         # Then login
         response = client.post(
             "/api/v1/auth/login",
-            params={"email": "logintest@example.com", "password": "TestPassword123!"},
+            json={"email": "logintest@example.com", "password": "TestPassword123!"},
         )
         assert response.status_code == 200
         assert "access_token" in response.json()
@@ -49,7 +53,7 @@ class TestAuthEndpoints:
         """Test login with invalid credentials"""
         response = client.post(
             "/api/v1/auth/login",
-            params={"email": "nonexistent@example.com", "password": "WrongPassword"},
+            json={"email": "nonexistent@example.com", "password": "WrongPassword"},
         )
         assert response.status_code == 401
 
@@ -63,16 +67,18 @@ class TestDatasetEndpoints:
         # Register test user
         client.post(
             "/api/v1/auth/register",
-            params={
+            json={
                 "email": "dstest@example.com",
                 "password": "TestPassword123!",
+                "full_name": "Dataset Test",
+                "role": "admin"
             },
         )
 
         # Login to get token
         response = client.post(
             "/api/v1/auth/login",
-            params={"email": "dstest@example.com", "password": "TestPassword123!"},
+            json={"email": "dstest@example.com", "password": "TestPassword123!"},
         )
         self.token = response.json()["access_token"]
         self.headers = {"Authorization": f"Bearer {self.token}"}
@@ -92,12 +98,17 @@ class TestPermissionEndpoints:
         # Register and login
         client.post(
             "/api/v1/auth/register",
-            params={"email": "userinfo@example.com", "password": "Password123!"},
+            json={
+                "email": "userinfo@example.com",
+                "password": "Password123!",
+                "full_name": "User Info",
+                "role": "viewer"
+            },
         )
 
         response = client.post(
             "/api/v1/auth/login",
-            params={"email": "userinfo@example.com", "password": "Password123!"},
+            json={"email": "userinfo@example.com", "password": "Password123!"},
         )
         token = response.json()["access_token"]
         headers = {"Authorization": f"Bearer {token}"}

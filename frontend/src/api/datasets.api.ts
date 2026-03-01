@@ -6,6 +6,8 @@ import {
     DatasetRow,
     DatasetPermission,
     DatasetColumn,
+    Batch,
+    SchemaVersion,
 } from '../types/dataset.types';
 import { PaginatedResponse, PaginationParams } from '../types/common.types';
 
@@ -25,7 +27,7 @@ export const datasetsApi = {
     },
 
     // Upload new dataset
-    uploadDataset: async (data: DatasetUploadData): Promise<{ id: string; message: string }> => {
+    uploadDataset: async (data: DatasetUploadData): Promise<{ id: string; name: string; row_count: number; status: string; batch_frequency: string }> => {
         const formData = new FormData();
         formData.append('file', data.file);
         formData.append('name', data.name);
@@ -35,8 +37,10 @@ export const datasetsApi = {
         if (data.masking_config) {
             formData.append('masking_config', JSON.stringify(data.masking_config));
         }
+        if (data.batch_frequency) formData.append('batch_frequency', data.batch_frequency);
+        if (data.batch_date) formData.append('batch_date', data.batch_date);
 
-        const response = await apiClient.post<{ id: string; message: string }>(
+        const response = await apiClient.post(
             '/datasets',
             formData,
             {
@@ -67,10 +71,10 @@ export const datasetsApi = {
         return response.data;
     },
 
-    // Get dataset rows with pagination
+    // Get dataset rows with pagination (supports batch filtering)
     getDatasetRows: async (
         datasetId: string,
-        params: PaginationParams & { columns?: string }
+        params: PaginationParams & { columns?: string; batch_id?: string }
     ): Promise<PaginatedResponse<DatasetRow>> => {
         const response = await apiClient.get<PaginatedResponse<DatasetRow>>(
             `/datasets/${datasetId}/rows`,
@@ -91,7 +95,8 @@ export const datasetsApi = {
         return response.data;
     },
 
-    // Grant permission
+    // ── Permissions ─────────────────────────────────────────────────
+
     grantPermission: async (
         datasetId: string,
         userEmail: string,
@@ -105,7 +110,6 @@ export const datasetsApi = {
         return response.data;
     },
 
-    // Revoke permission
     revokePermission: async (
         datasetId: string,
         userEmail: string
@@ -116,19 +120,29 @@ export const datasetsApi = {
         return response.data;
     },
 
-    // List permissions
     fetchPermissions: async (datasetId: string): Promise<DatasetPermission[]> => {
         const response = await apiClient.get<DatasetPermission[]>(`/datasets/${datasetId}/permissions`);
         return response.data;
     },
 
-    // Get schema
-    fetchSchema: async (datasetId: string): Promise<DatasetColumn[]> => {
-        const response = await apiClient.get<DatasetColumn[]>(`/datasets/${datasetId}/schema`);
+    // ── Schema ──────────────────────────────────────────────────────
+
+    fetchSchema: async (datasetId: string, version?: number): Promise<DatasetColumn[]> => {
+        const params = version !== undefined ? { version } : {};
+        const response = await apiClient.get<DatasetColumn[]>(
+            `/datasets/${datasetId}/schema`,
+            { params }
+        );
         return response.data;
     },
 
-    // Update masking rule
+    fetchSchemaHistory: async (datasetId: string): Promise<SchemaVersion[]> => {
+        const response = await apiClient.get<SchemaVersion[]>(
+            `/datasets/${datasetId}/schema/history`
+        );
+        return response.data;
+    },
+
     updateMaskingRule: async (
         datasetId: string,
         columnName: string,
@@ -138,6 +152,29 @@ export const datasetsApi = {
             `/datasets/${datasetId}/schema/${columnName}/masking`,
             null,
             { params: { mask_rule: maskRule } }
+        );
+        return response.data;
+    },
+
+    // ── Batches ─────────────────────────────────────────────────────
+
+    listBatches: async (
+        datasetId: string,
+        params: PaginationParams
+    ): Promise<PaginatedResponse<Batch>> => {
+        const response = await apiClient.get<PaginatedResponse<Batch>>(
+            `/datasets/${datasetId}/batches`,
+            { params }
+        );
+        return response.data;
+    },
+
+    deleteBatch: async (
+        datasetId: string,
+        batchId: string
+    ): Promise<{ message: string; batch_id: string }> => {
+        const response = await apiClient.delete<{ message: string; batch_id: string }>(
+            `/datasets/${datasetId}/batches/${batchId}`
         );
         return response.data;
     },

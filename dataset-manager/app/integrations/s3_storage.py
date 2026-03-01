@@ -55,6 +55,18 @@ class S3StorageService:
 
             self.s3_client = boto3.client("s3", **client_kwargs)
             logger.info(f"Connected to S3 bucket: {self.bucket_name}")
+            
+            # Ensure bucket exists
+            try:
+                self.s3_client.create_bucket(Bucket=self.bucket_name)
+                logger.info(f"Created bucket: {self.bucket_name}")
+            except ClientError as e:
+                # If BucketAlreadyExists or BucketAlreadyOwnedByYou, it's fine
+                code = e.response.get("Error", {}).get("Code")
+                if code in ("BucketAlreadyExists", "BucketAlreadyOwnedByYou"):
+                    pass
+                else:
+                    logger.warning(f"Could not ensure bucket {self.bucket_name}: {e}")
         except Exception as e:
             logger.error(f"Failed to connect to S3/MinIO: {str(e)}")
             raise
@@ -86,13 +98,16 @@ class S3StorageService:
 
             # Prepare metadata
             extra_args = {
-                "ServerSideEncryption": "AES256",
                 "Metadata": {
                     "original-filename": filename,
                     "upload-timestamp": datetime.utcnow().isoformat(),
                     "file-size": str(file_size),
                 },
             }
+
+            # Only use encryption if not using a custom endpoint (MinIO) or if explicitly enabled
+            if not self.endpoint_url:
+                extra_args["ServerSideEncryption"] = "AES256"
 
             if metadata:
                 extra_args["Metadata"].update({k: str(v) for k, v in metadata.items()})
