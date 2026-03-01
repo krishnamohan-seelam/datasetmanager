@@ -29,6 +29,8 @@ class PermissionService:
                 (dataset_id, user_email, role, granted_at)
                 VALUES (%s, %s, %s, %s)
             """
+            if isinstance(dataset_id, str):
+                dataset_id = UUID(dataset_id)
 
             self.db.execute(query, [dataset_id, user_email, role, datetime.utcnow()])
 
@@ -47,6 +49,8 @@ class PermissionService:
                 DELETE FROM {self.keyspace}.dataset_permissions
                 WHERE dataset_id = %s AND user_email = %s
             """
+            if isinstance(dataset_id, str):
+                dataset_id = UUID(dataset_id)
 
             self.db.execute(query, [dataset_id, user_email])
 
@@ -64,6 +68,8 @@ class PermissionService:
                 FROM {self.keyspace}.dataset_permissions
                 WHERE dataset_id = %s AND user_email = %s
             """
+            if isinstance(dataset_id, str):
+                dataset_id = UUID(dataset_id)
 
             result = self.db.execute(query, [dataset_id, user_email])
             row = result.one()
@@ -88,6 +94,8 @@ class PermissionService:
                 FROM {self.keyspace}.dataset_permissions
                 WHERE dataset_id = %s
             """
+            if isinstance(dataset_id, str):
+                dataset_id = UUID(dataset_id)
 
             result = self.db.execute(query, [dataset_id])
             permissions = [

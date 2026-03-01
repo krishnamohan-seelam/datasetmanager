@@ -21,6 +21,10 @@ import {
     Breadcrumbs,
     Link,
     Divider,
+    FormControl,
+    InputLabel,
+    Select,
+    MenuItem,
 } from '@mui/material';
 import {
     CloudUpload as CloudUploadIcon,
@@ -31,15 +35,26 @@ import {
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uploadDataset } from '../../store/slices/datasetsSlice';
 import { useSnackbar } from 'notistack';
+import { BatchFrequency } from '../../types/dataset.types';
 
 const schema = z.object({
     name: z.string().min(3, 'Name must be at least 3 characters'),
     description: z.string().optional().default(''),
     tags: z.array(z.string()).default([]),
     is_public: z.boolean().default(false),
+    batch_frequency: z.string().default('once'),
+    batch_date: z.string().optional().default(''),
 });
 
 type FormData = z.infer<typeof schema>;
+
+const BATCH_FREQUENCY_OPTIONS: { value: BatchFrequency; label: string; description: string }[] = [
+    { value: 'once', label: 'One-time', description: 'Single upload, no recurring batches' },
+    { value: 'hourly', label: 'Hourly', description: 'Data arrives every hour' },
+    { value: 'daily', label: 'Daily', description: 'Data arrives once per day' },
+    { value: 'weekly', label: 'Weekly', description: 'Data arrives once per week' },
+    { value: 'monthly', label: 'Monthly', description: 'Data arrives once per month' },
+];
 
 const DatasetUploadPage: React.FC = () => {
     const navigate = useNavigate();
@@ -63,15 +78,17 @@ const DatasetUploadPage: React.FC = () => {
             description: '',
             tags: [],
             is_public: false,
+            batch_frequency: 'once',
+            batch_date: '',
         },
     });
 
     const tags = watch('tags');
+    const batchFrequency = watch('batch_frequency');
 
     const onDrop = useCallback((acceptedFiles: File[]) => {
         if (acceptedFiles.length > 0) {
             setFile(acceptedFiles[0]);
-            // Auto-fill name if empty
             const currentName = watch('name');
             if (!currentName) {
                 const fileName = acceptedFiles[0].name.split('.').slice(0, -1).join('.');
@@ -119,6 +136,8 @@ const DatasetUploadPage: React.FC = () => {
                 ...data,
                 tags: data.tags || [],
                 file,
+                batch_frequency: data.batch_frequency as BatchFrequency,
+                batch_date: data.batch_date || undefined,
             })).unwrap();
 
             enqueueSnackbar('Dataset uploaded successfully!', { variant: 'success' });
@@ -147,6 +166,7 @@ const DatasetUploadPage: React.FC = () => {
 
             <Paper sx={{ p: { xs: 3, md: 4 }, borderRadius: 3 }}>
                 <form onSubmit={handleSubmit(onSubmit)}>
+                    {/* Step 1: File */}
                     <Box sx={{ mb: 4 }}>
                         <Typography variant="h6" gutterBottom>
                             1. Select File
@@ -210,6 +230,7 @@ const DatasetUploadPage: React.FC = () => {
 
                     <Divider sx={{ my: 4 }} />
 
+                    {/* Step 2: Details */}
                     <Box sx={{ mb: 4 }}>
                         <Typography variant="h6" gutterBottom>
                             2. Dataset Details
@@ -296,6 +317,64 @@ const DatasetUploadPage: React.FC = () => {
                                     />
                                 )}
                             />
+                        </Stack>
+                    </Box>
+
+                    <Divider sx={{ my: 4 }} />
+
+                    {/* Step 3: Ingestion Schedule */}
+                    <Box sx={{ mb: 4 }}>
+                        <Typography variant="h6" gutterBottom>
+                            3. Ingestion Schedule
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                            Configure how often new data batches will be uploaded to this dataset.
+                        </Typography>
+                        <Stack spacing={3}>
+                            <Controller
+                                name="batch_frequency"
+                                control={control}
+                                render={({ field }) => (
+                                    <FormControl fullWidth disabled={uploading}>
+                                        <InputLabel>Batch Frequency</InputLabel>
+                                        <Select {...field} label="Batch Frequency">
+                                            {BATCH_FREQUENCY_OPTIONS.map((opt) => (
+                                                <MenuItem key={opt.value} value={opt.value}>
+                                                    <Box>
+                                                        <Typography variant="body2" fontWeight="medium">
+                                                            {opt.label}
+                                                        </Typography>
+                                                        <Typography variant="caption" color="text.secondary">
+                                                            {opt.description}
+                                                        </Typography>
+                                                    </Box>
+                                                </MenuItem>
+                                            ))}
+                                        </Select>
+                                        <FormHelperText>
+                                            Choose how frequently you'll append new data to this dataset
+                                        </FormHelperText>
+                                    </FormControl>
+                                )}
+                            />
+
+                            {batchFrequency !== 'once' && (
+                                <Controller
+                                    name="batch_date"
+                                    control={control}
+                                    render={({ field }) => (
+                                        <TextField
+                                            {...field}
+                                            label="Batch Date (optional)"
+                                            type="datetime-local"
+                                            fullWidth
+                                            disabled={uploading}
+                                            InputLabelProps={{ shrink: true }}
+                                            helperText="Date this batch represents. Defaults to now if not set."
+                                        />
+                                    )}
+                                />
+                            )}
                         </Stack>
                     </Box>
 

@@ -1,6 +1,6 @@
 # Dataset Manager Platform
 
-A high-performance, scalable platform designed for managing, analyzing, and securing large-scale datasets. This platform features a hybrid storage architecture, dynamic data masking, and a robust ETL pipeline.
+A high-performance, scalable platform designed for managing, analyzing, and securing large-scale datasets. This platform features batch ingestion, schema versioning, dynamic data masking, and a robust ETL pipeline.
 
 
 
@@ -22,7 +22,9 @@ A high-performance, scalable platform designed for managing, analyzing, and secu
 ---
 
 *   **Dynamic Storage Engine**: Automatically creates per-dataset Cassandra tables with typed columns for optimized performance.
-*   **Privacy-First Analytics**: Context-aware data masking (Email, SSN, Phone, CC) that automatically adapts based on user roles.
+*   **Batch Ingestion**: Support for one-time, hourly, daily, weekly, and monthly data batches with per-batch isolation and management.
+*   **Schema Versioning**: Automatic schema evolution with version history, soft-deleted columns, and diff-based change tracking.
+*   **Privacy-First Analytics**: Context-aware data masking (Email, SSN, Phone, CC + 7 more rules) that automatically adapts based on user roles.
 *   **Advanced Visualization**: Real-time data quality metrics and distributions powered by Recharts.
 *   **Event-Driven Architecture**: Fully integrated with Apache Kafka for real-time audit logging and system events.
 *   **Scalable ETL Pipeline**: Apache Airflow DAGs for automated dataset validation and ingestion.
@@ -70,7 +72,7 @@ datasetmanager/
 ├── dataset-manager/              # Backend (Python/FastAPI)
 │   ├── app/
 │   │   ├── core/                 # Security, Masking, Config
-│   │   ├── services/             # Dataset, Permission, Pagination Cache
+│   │   ├── services/             # Dataset, Schema, Batch, Permission, Cache
 │   │   ├── schemas/              # Pydantic request/response models
 │   │   ├── integrations/         # S3, Kafka, Redis, Local Storage
 │   │   ├── middleware/           # Audit Logging, Rate Limiting
@@ -80,7 +82,7 @@ datasetmanager/
 │   ├── airflow/dags/             # Airflow ETL pipeline DAGs
 │   ├── scripts/                  # DB migration & init scripts
 │   ├── tests/
-│   │   ├── unit/                 # Unit tests (services, cache)
+│   │   ├── unit/                 # Unit tests (services, schema, batch, cache)
 │   │   ├── integration/          # Integration tests (Release 2)
 │   │   └── performance_benchmarks.py
 │   ├── pyproject.toml            # Single dependency manifest

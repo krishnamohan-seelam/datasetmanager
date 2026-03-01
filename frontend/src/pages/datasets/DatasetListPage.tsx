@@ -15,12 +15,21 @@ import {
     Select,
     FormControl,
     InputLabel,
+    Stack,
 } from '@mui/material';
 import SearchIcon from '@mui/icons-material/Search';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchDatasets, setFilters, setPagination } from '../../store/slices/datasetsSlice';
 import LoadingSpinner from '../../components/common/LoadingSpinner';
 import { Dataset } from '../../types/dataset.types';
+
+const FREQ_BADGE: Record<string, { label: string; color: 'default' | 'primary' | 'secondary' | 'success' | 'info' | 'warning' }> = {
+    once: { label: 'One-time', color: 'default' },
+    hourly: { label: '⏱ Hourly', color: 'warning' },
+    daily: { label: '📅 Daily', color: 'info' },
+    weekly: { label: '📆 Weekly', color: 'primary' },
+    monthly: { label: '🗓 Monthly', color: 'secondary' },
+};
 
 const DatasetListPage = () => {
     const navigate = useNavigate();
@@ -112,47 +121,60 @@ const DatasetListPage = () => {
                 </Box>
             ) : (
                 <Grid container spacing={3}>
-                    {(items || []).map((dataset: Dataset) => (
-                        <Grid size={{ xs: 12, sm: 6, md: 4 }} key={dataset.id}>
-                            <Card>
-                                <CardContent>
-                                    <Typography variant="h6" gutterBottom noWrap>
-                                        {dataset.name}
-                                    </Typography>
-                                    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                                        {dataset.description || 'No description'}
-                                    </Typography>
-                                    <Box sx={{ mb: 1 }}>
-                                        <Chip
-                                            label={dataset.status || 'ready'}
-                                            size="small"
-                                            color={dataset.status === 'ready' ? 'success' : 'default'}
-                                            sx={{ mr: 1 }}
-                                        />
-                                        <Chip
-                                            label={(dataset.file_format || 'csv').toUpperCase()}
-                                            size="small"
-                                            variant="outlined"
-                                        />
-                                    </Box>
-                                    <Typography variant="caption" display="block">
-                                        Rows: {(dataset.row_count || 0).toLocaleString()}
-                                    </Typography>
-                                    <Typography variant="caption" display="block">
-                                        Size: {formatBytes(dataset.size_bytes || 0)}
-                                    </Typography>
-                                    <Typography variant="caption" display="block">
-                                        Created: {formatDate(dataset.created_at)}
-                                    </Typography>
-                                </CardContent>
-                                <CardActions>
-                                    <Button size="small" onClick={() => navigate(`/datasets/${dataset.id}`)}>
-                                        View Details
-                                    </Button>
-                                </CardActions>
-                            </Card>
-                        </Grid>
-                    ))}
+                    {(items || []).map((dataset: Dataset) => {
+                        const freq = FREQ_BADGE[dataset.batch_frequency] || FREQ_BADGE['once'];
+                        return (
+                            <Grid size={{ xs: 12, sm: 6, md: 4 }} key={dataset.id}>
+                                <Card>
+                                    <CardContent>
+                                        <Typography variant="h6" gutterBottom noWrap>
+                                            {dataset.name}
+                                        </Typography>
+                                        <Typography variant="body2" color="text.secondary" sx={{ mb: 2, minHeight: 40 }}>
+                                            {dataset.description || 'No description'}
+                                        </Typography>
+                                        <Stack direction="row" spacing={1} sx={{ mb: 1.5, flexWrap: 'wrap', gap: 0.5 }}>
+                                            <Chip
+                                                label={dataset.status || 'ready'}
+                                                size="small"
+                                                color={dataset.status === 'ready' ? 'success' : 'default'}
+                                            />
+                                            <Chip
+                                                label={(dataset.file_format || 'csv').toUpperCase()}
+                                                size="small"
+                                                variant="outlined"
+                                            />
+                                            {dataset.batch_frequency && dataset.batch_frequency !== 'once' && (
+                                                <Chip
+                                                    label={freq.label}
+                                                    size="small"
+                                                    color={freq.color}
+                                                    variant="outlined"
+                                                />
+                                            )}
+                                        </Stack>
+                                        <Typography variant="caption" display="block">
+                                            Rows: {(dataset.row_count || 0).toLocaleString()}
+                                            {(dataset.total_batches || 0) > 1 && (
+                                                <> • {dataset.total_batches} batches</>
+                                            )}
+                                        </Typography>
+                                        <Typography variant="caption" display="block">
+                                            Size: {formatBytes(dataset.size_bytes || 0)}
+                                        </Typography>
+                                        <Typography variant="caption" display="block">
+                                            Created: {formatDate(dataset.created_at)}
+                                        </Typography>
+                                    </CardContent>
+                                    <CardActions>
+                                        <Button size="small" onClick={() => navigate(`/datasets/${dataset.id}`)}>
+                                            View Details
+                                        </Button>
+                                    </CardActions>
+                                </Card>
+                            </Grid>
+                        );
+                    })}
                 </Grid>
             )}
 

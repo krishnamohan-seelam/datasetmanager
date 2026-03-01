@@ -7,6 +7,8 @@ import {
     DatasetRow,
     DatasetPermission,
     DatasetColumn,
+    Batch,
+    SchemaVersion,
 } from '../../types/dataset.types';
 import { PaginatedResponse, PaginationParams } from '../../types/common.types';
 
@@ -16,6 +18,8 @@ interface DatasetsState {
     currentDatasetRows: DatasetRow[];
     currentDatasetPermissions: DatasetPermission[];
     currentDatasetSchema: DatasetColumn[];
+    currentDatasetBatches: Batch[];
+    currentSchemaHistory: SchemaVersion[];
     filters: DatasetFilters;
     pagination: {
         page: number;
@@ -24,6 +28,12 @@ interface DatasetsState {
         pages: number;
     };
     rowsPagination: {
+        page: number;
+        page_size: number;
+        total: number;
+        pages: number;
+    };
+    batchesPagination: {
         page: number;
         page_size: number;
         total: number;
@@ -40,6 +50,8 @@ const initialState: DatasetsState = {
     currentDatasetRows: [],
     currentDatasetPermissions: [],
     currentDatasetSchema: [],
+    currentDatasetBatches: [],
+    currentSchemaHistory: [],
     filters: {
         sort_by: 'created_at',
         order: 'desc',
@@ -56,18 +68,24 @@ const initialState: DatasetsState = {
         total: 0,
         pages: 0,
     },
+    batchesPagination: {
+        page: 1,
+        page_size: 20,
+        total: 0,
+        pages: 0,
+    },
     loading: false,
     uploading: false,
     error: null,
 };
 
-// Async thunks
+// ── Async thunks ────────────────────────────────────────────────────────
+
 export const fetchDatasets = createAsyncThunk(
     'datasets/fetchDatasets',
     async (params: PaginationParams & DatasetFilters, { rejectWithValue }) => {
         try {
-            const response = await datasetsApi.listDatasets(params);
-            return response;
+            return await datasetsApi.listDatasets(params);
         } catch (error: any) {
             return rejectWithValue(error.response?.data?.error?.message || 'Failed to fetch datasets');
         }
@@ -78,8 +96,7 @@ export const fetchDataset = createAsyncThunk(
     'datasets/fetchDataset',
     async (datasetId: string, { rejectWithValue }) => {
         try {
-            const dataset = await datasetsApi.getDataset(datasetId);
-            return dataset;
+            return await datasetsApi.getDataset(datasetId);
         } catch (error: any) {
             return rejectWithValue(error.response?.data?.error?.message || 'Failed to fetch dataset');
         }
@@ -90,8 +107,7 @@ export const uploadDataset = createAsyncThunk(
     'datasets/uploadDataset',
     async (data: DatasetUploadData, { rejectWithValue }) => {
         try {
-            const response = await datasetsApi.uploadDataset(data);
-            return response;
+            return await datasetsApi.uploadDataset(data);
         } catch (error: any) {
             return rejectWithValue(error.response?.data?.error?.message || 'Failed to upload dataset');
         }
@@ -144,7 +160,7 @@ export const updateDataset = createAsyncThunk(
     'datasets/updateDataset',
     async ({ id, updates }: { id: string; updates: Partial<Dataset> }, { rejectWithValue }) => {
         try {
-            const response = await datasetsApi.updateDataset(id, updates);
+            await datasetsApi.updateDataset(id, updates);
             return { id, updates };
         } catch (error: any) {
             return rejectWithValue(error.response?.data?.error?.message || 'Failed to update dataset');
@@ -167,16 +183,13 @@ export const deleteDataset = createAsyncThunk(
 export const fetchDatasetRows = createAsyncThunk(
     'datasets/fetchDatasetRows',
     async (
-        { datasetId, params }: { datasetId: string; params: PaginationParams },
+        { datasetId, params }: { datasetId: string; params: PaginationParams & { batch_id?: string } },
         { rejectWithValue }
     ) => {
         try {
-            const response = await datasetsApi.getDatasetRows(datasetId, params);
-            return response;
+            return await datasetsApi.getDatasetRows(datasetId, params);
         } catch (error: any) {
-            return rejectWithValue(
-                error.response?.data?.error?.message || 'Failed to fetch dataset rows'
-            );
+            return rejectWithValue(error.response?.data?.error?.message || 'Failed to fetch dataset rows');
         }
     }
 );
@@ -185,8 +198,7 @@ export const fetchPermissions = createAsyncThunk(
     'datasets/fetchPermissions',
     async (datasetId: string, { rejectWithValue }) => {
         try {
-            const permissions = await datasetsApi.fetchPermissions(datasetId);
-            return permissions;
+            return await datasetsApi.fetchPermissions(datasetId);
         } catch (error: any) {
             return rejectWithValue(error.response?.data?.error?.message || 'Failed to fetch permissions');
         }
@@ -195,12 +207,22 @@ export const fetchPermissions = createAsyncThunk(
 
 export const fetchSchema = createAsyncThunk(
     'datasets/fetchSchema',
-    async (datasetId: string, { rejectWithValue }) => {
+    async ({ datasetId, version }: { datasetId: string; version?: number }, { rejectWithValue }) => {
         try {
-            const schema = await datasetsApi.fetchSchema(datasetId);
-            return schema;
+            return await datasetsApi.fetchSchema(datasetId, version);
         } catch (error: any) {
             return rejectWithValue(error.response?.data?.error?.message || 'Failed to fetch schema');
+        }
+    }
+);
+
+export const fetchSchemaHistory = createAsyncThunk(
+    'datasets/fetchSchemaHistory',
+    async (datasetId: string, { rejectWithValue }) => {
+        try {
+            return await datasetsApi.fetchSchemaHistory(datasetId);
+        } catch (error: any) {
+            return rejectWithValue(error.response?.data?.error?.message || 'Failed to fetch schema history');
         }
     }
 );
@@ -220,6 +242,37 @@ export const updateMaskingRule = createAsyncThunk(
     }
 );
 
+export const fetchBatches = createAsyncThunk(
+    'datasets/fetchBatches',
+    async (
+        { datasetId, params }: { datasetId: string; params: PaginationParams },
+        { rejectWithValue }
+    ) => {
+        try {
+            return await datasetsApi.listBatches(datasetId, params);
+        } catch (error: any) {
+            return rejectWithValue(error.response?.data?.error?.message || 'Failed to fetch batches');
+        }
+    }
+);
+
+export const deleteBatch = createAsyncThunk(
+    'datasets/deleteBatch',
+    async (
+        { datasetId, batchId }: { datasetId: string; batchId: string },
+        { rejectWithValue }
+    ) => {
+        try {
+            await datasetsApi.deleteBatch(datasetId, batchId);
+            return batchId;
+        } catch (error: any) {
+            return rejectWithValue(error.response?.data?.error?.message || 'Failed to delete batch');
+        }
+    }
+);
+
+// ── Slice ───────────────────────────────────────────────────────────────
+
 const datasetsSlice = createSlice({
     name: 'datasets',
     initialState,
@@ -236,9 +289,17 @@ const datasetsSlice = createSlice({
         ) => {
             state.rowsPagination = { ...state.rowsPagination, ...action.payload };
         },
+        setBatchesPagination: (
+            state,
+            action: PayloadAction<Partial<typeof initialState.batchesPagination>>
+        ) => {
+            state.batchesPagination = { ...state.batchesPagination, ...action.payload };
+        },
         clearCurrentDataset: (state) => {
             state.currentDataset = null;
             state.currentDatasetRows = [];
+            state.currentDatasetBatches = [];
+            state.currentSchemaHistory = [];
         },
         clearError: (state) => {
             state.error = null;
@@ -376,28 +437,26 @@ const datasetsSlice = createSlice({
             });
 
         // Grant permission
-        builder
-            .addCase(grantPermission.fulfilled, (state, action) => {
-                const { userEmail, role } = action.payload;
-                const existing = state.currentDatasetPermissions.find(p => p.user_email === userEmail);
-                if (existing) {
-                    existing.role = role as any;
-                } else {
-                    state.currentDatasetPermissions.push({
-                        user_email: userEmail,
-                        role: role as any,
-                        granted_at: new Date().toISOString()
-                    });
-                }
-            });
+        builder.addCase(grantPermission.fulfilled, (state, action) => {
+            const { userEmail, role } = action.payload;
+            const existing = state.currentDatasetPermissions.find(p => p.user_email === userEmail);
+            if (existing) {
+                existing.role = role as any;
+            } else {
+                state.currentDatasetPermissions.push({
+                    user_email: userEmail,
+                    role: role as any,
+                    granted_at: new Date().toISOString(),
+                });
+            }
+        });
 
         // Revoke permission
-        builder
-            .addCase(revokePermission.fulfilled, (state, action) => {
-                state.currentDatasetPermissions = state.currentDatasetPermissions.filter(
-                    p => p.user_email !== action.payload.userEmail
-                );
-            });
+        builder.addCase(revokePermission.fulfilled, (state, action) => {
+            state.currentDatasetPermissions = state.currentDatasetPermissions.filter(
+                p => p.user_email !== action.payload.userEmail
+            );
+        });
 
         // Fetch schema
         builder
@@ -414,19 +473,59 @@ const datasetsSlice = createSlice({
                 state.error = action.payload as string;
             });
 
-        // Update masking rule
+        // Fetch schema history
         builder
-            .addCase(updateMaskingRule.fulfilled, (state, action) => {
-                const { columnName, maskRule } = action.payload;
-                const col = state.currentDatasetSchema.find(c => c.name === columnName);
-                if (col) {
-                    col.mask_rule = maskRule || undefined;
-                    col.masked = !!maskRule;
-                }
+            .addCase(fetchSchemaHistory.fulfilled, (state, action: PayloadAction<SchemaVersion[]>) => {
+                state.currentSchemaHistory = action.payload;
             });
+
+        // Update masking rule
+        builder.addCase(updateMaskingRule.fulfilled, (state, action) => {
+            const { columnName, maskRule } = action.payload;
+            const col = state.currentDatasetSchema.find(c => c.name === columnName);
+            if (col) {
+                col.mask_rule = maskRule || undefined;
+                col.masked = !!maskRule;
+            }
+        });
+
+        // Fetch batches
+        builder
+            .addCase(fetchBatches.pending, (state) => {
+                state.loading = true;
+                state.error = null;
+            })
+            .addCase(fetchBatches.fulfilled, (state, action: PayloadAction<PaginatedResponse<Batch>>) => {
+                state.loading = false;
+                state.currentDatasetBatches = action.payload.items;
+                state.batchesPagination = {
+                    page: action.payload.page,
+                    page_size: action.payload.page_size,
+                    total: action.payload.total,
+                    pages: action.payload.pages,
+                };
+            })
+            .addCase(fetchBatches.rejected, (state, action) => {
+                state.loading = false;
+                state.error = action.payload as string;
+            });
+
+        // Delete batch
+        builder.addCase(deleteBatch.fulfilled, (state, action: PayloadAction<string>) => {
+            state.currentDatasetBatches = state.currentDatasetBatches.filter(
+                b => b.batch_id !== action.payload
+            );
+            state.batchesPagination.total = Math.max(0, state.batchesPagination.total - 1);
+        });
     },
 });
 
-export const { setFilters, setPagination, setRowsPagination, clearCurrentDataset, clearError } =
-    datasetsSlice.actions;
+export const {
+    setFilters,
+    setPagination,
+    setRowsPagination,
+    setBatchesPagination,
+    clearCurrentDataset,
+    clearError,
+} = datasetsSlice.actions;
 export default datasetsSlice.reducer;

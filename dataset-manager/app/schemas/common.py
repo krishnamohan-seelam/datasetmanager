@@ -2,6 +2,7 @@
 Pydantic models for request/response validation
 """
 
+from enum import Enum
 from pydantic import BaseModel, Field
 from typing import Generic, TypeVar, List, Optional, Any, Dict
 from datetime import datetime
@@ -10,17 +11,26 @@ from uuid import UUID
 T = TypeVar("T")
 
 
-# Pagination
+# ── Enums ────────────────────────────────────────────────────────────────
+
+class BatchFrequency(str, Enum):
+    ONCE = "once"
+    HOURLY = "hourly"
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    MONTHLY = "monthly"
+
+
+# ── Pagination ───────────────────────────────────────────────────────────
+
 class PaginationParams(BaseModel):
     """Reusable pagination parameters"""
-
     page: int = Field(default=1, ge=1, description="Page number")
     page_size: int = Field(default=100, ge=1, le=1000, description="Items per page")
 
 
 class PaginatedResponse(BaseModel, Generic[T]):
     """Reusable paginated response wrapper"""
-
     total: int = Field(description="Total number of items")
     page: int = Field(description="Current page")
     page_size: int = Field(description="Items per page")
@@ -28,7 +38,8 @@ class PaginatedResponse(BaseModel, Generic[T]):
     items: List[T] = Field(description="Items in current page")
 
 
-# User
+# ── User ─────────────────────────────────────────────────────────────────
+
 class UserBase(BaseModel):
     email: str
     full_name: Optional[str] = None
@@ -44,7 +55,45 @@ class UserResponse(UserBase):
     is_active: bool
 
 
-# Dataset
+# ── Dataset Column & Schema ──────────────────────────────────────────────
+
+class DatasetColumn(BaseModel):
+    name: str
+    type: str
+    nullable: bool = True
+    masked: bool = False
+    mask_rule: Optional[str] = None
+    position: int = 0
+    is_active: bool = True
+
+
+class SchemaVersionResponse(BaseModel):
+    """Schema version metadata with columns"""
+    version: int
+    batch_id: Optional[UUID] = None
+    created_at: Optional[datetime] = None
+    column_count: int = 0
+    change_summary: Optional[str] = None
+    columns: List[DatasetColumn] = []
+
+
+# ── Batch ────────────────────────────────────────────────────────────────
+
+class BatchResponse(BaseModel):
+    """Response model for a single batch"""
+    batch_id: UUID
+    batch_date: datetime
+    schema_version: int = 1
+    row_count: int = 0
+    size_bytes: int = 0
+    file_format: str = "csv"
+    status: str = "uploading"
+    uploaded_by: str = ""
+    created_at: Optional[datetime] = None
+
+
+# ── Dataset ──────────────────────────────────────────────────────────────
+
 class DatasetBase(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     description: Optional[str] = None
@@ -62,15 +111,7 @@ class DatasetMetadataUpdate(BaseModel):
     tags: Optional[List[str]] = None
     is_public: Optional[bool] = None
     masking_config: Optional[Dict[str, str]] = None
-
-
-class DatasetColumn(BaseModel):
-    name: str
-    type: str
-    nullable: bool = True
-    masked: bool = False
-    mask_rule: Optional[str] = None
-    position: int = 0
+    batch_frequency: Optional[str] = None
 
 
 class DatasetStatistics(BaseModel):
@@ -104,6 +145,10 @@ class DatasetResponse(BaseModel):
     schema: Optional[List[DatasetColumn]] = None
     statistics: Optional[DatasetStatistics] = None
     permissions: Optional[DatasetPermissions] = None
+    batch_frequency: str = "once"
+    latest_batch_date: Optional[datetime] = None
+    total_batches: int = 0
+    schema_version: int = 1
 
 
 class DatasetListResponse(BaseModel):
@@ -118,13 +163,17 @@ class DatasetListResponse(BaseModel):
     is_public: bool
     status: str = "ready"
     tags: List[str] = []
+    batch_frequency: str = "once"
+    total_batches: int = 0
 
 
-# Rows/Data
+# ── Rows/Data ────────────────────────────────────────────────────────────
+
 class RowsResponse(BaseModel):
     total: int
     page: int
     page_size: int
+    pages: int
     items: List[Dict[str, Any]]
 
 
@@ -136,7 +185,8 @@ class RowsQuery(BaseModel):
     masked: bool = True
 
 
-# Permissions
+# ── Permissions ──────────────────────────────────────────────────────────
+
 class PermissionBase(BaseModel):
     user_email: str
     role: str = Field(default="viewer", pattern="^(admin|contributor|viewer)$")
@@ -147,7 +197,8 @@ class PermissionResponse(PermissionBase):
     granted_at: datetime
 
 
-# Auth
+# ── Auth ─────────────────────────────────────────────────────────────────
+
 class AuthResponse(BaseModel):
     token: str
     access_token: str  # For OAuth2 compatibility
@@ -168,7 +219,8 @@ class RegisterRequest(BaseModel):
     role: Optional[str] = "viewer"
 
 
-# ETL Job
+# ── ETL Job ──────────────────────────────────────────────────────────────
+
 class ETLJobResponse(BaseModel):
     job_id: UUID
     dataset_id: UUID
@@ -180,7 +232,8 @@ class ETLJobResponse(BaseModel):
     error_message: Optional[str] = None
 
 
-# Standard error response
+# ── Standard error response ─────────────────────────────────────────────
+
 class ErrorDetail(BaseModel):
     code: str
     message: str

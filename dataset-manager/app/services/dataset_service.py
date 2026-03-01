@@ -21,6 +21,8 @@ from ..core.exceptions import (
 from ..core.masking import DataMasker
 from ..core.config import settings
 from .pagination_cache import PaginationCacheService
+from .schema_service import SchemaService
+from .batch_service import BatchService
 
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,8 @@ class DatasetService:
             host=settings.REDIS_HOST,
             port=settings.REDIS_PORT,
         )
+        self.schema_service = SchemaService()
+        self.batch_service = BatchService()
 
     def _get_table_name(self, dataset_id: UUID) -> str:
         """Generate a safe Cassandra table name from dataset ID"""
@@ -72,8 +76,9 @@ class DatasetService:
             if self.db.execute(check_query).one():
                 return
 
-            # Base columns
+            # Base columns — batch_id is part of the composite partition key
             columns = [
+                "batch_id UUID",
                 "row_chunk_id INT",
                 "row_id BIGINT"
             ]
@@ -90,7 +95,7 @@ class DatasetService:
             query = f"""
                 CREATE TABLE IF NOT EXISTS {self.keyspace}.{table_name} (
                     {", ".join(columns)},
-                    PRIMARY KEY (row_chunk_id, row_id)
+                    PRIMARY KEY ((batch_id, row_chunk_id), row_id)
                 ) WITH CLUSTERING ORDER BY (row_id ASC);
             """
             self.db.execute(query)
@@ -98,6 +103,18 @@ class DatasetService:
         except Exception as e:
             logger.error(f"Failed to create table {table_name}: {e}")
             raise DatabaseException(f"Failed to create storage for dataset: {str(e)}")
+
+    def _table_has_batch_id(self, table_name: str) -> bool:
+        """Check if a ds_rows_* table has the batch_id column (new schema)."""
+        try:
+            query = (
+                f"SELECT column_name FROM system_schema.columns "
+                f"WHERE keyspace_name = '{self.keyspace}' AND table_name = '{table_name}' "
+                f"AND column_name = 'batch_id'"
+            )
+            return self.db.execute(query).one() is not None
+        except Exception:
+            return False
 
     def create_dataset(
         self,
@@ -110,8 +127,9 @@ class DatasetService:
         size_bytes: int = 0,
         status: str = "ready",
         masking_config: Optional[Dict[str, str]] = None,
+        batch_frequency: str = "once",
     ) -> UUID:
-        """Create a new dataset"""
+        """Create a new dataset with batch tracking fields"""
         try:
             dataset_id = uuid4()
             created_at = datetime.utcnow()
@@ -119,8 +137,10 @@ class DatasetService:
 
             query = f"""
                 INSERT INTO {self.keyspace}.datasets 
-                (dataset_id, name, description, owner, tags, is_public, created_at, updated_at, row_count, size_bytes, file_format, status, masking_config)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (dataset_id, name, description, owner, tags, is_public,
+                 created_at, updated_at, row_count, size_bytes, file_format,
+                 status, masking_config, batch_frequency, total_batches, schema_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
 
             masking_config_json = json.dumps(masking_config or {})
@@ -140,8 +160,14 @@ class DatasetService:
                     file_format,
                     status,
                     masking_config_json,
+                    batch_frequency,
+                    0,
+                    0,
                 ],
             )
+
+            # Invalidate global listing caches
+            self.cache.invalidate_datasets_list()
 
             logger.info(f"Created dataset {dataset_id} for user {owner}")
             return dataset_id
@@ -218,7 +244,7 @@ class DatasetService:
                 all_rows = [
                     row
                     for row in all_rows
-                    if search_lower in row.name.lower()
+                    if (row.name and search_lower in row.name.lower())
                     or (row.description and search_lower in row.description.lower())
                 ]
 
@@ -301,20 +327,28 @@ class DatasetService:
             raise DatabaseException(f"Failed to update dataset: {str(e)}")
 
     def delete_dataset(self, dataset_id: UUID) -> bool:
-        """Delete dataset and all associated data"""
+        """Delete dataset and all associated data (schema, batches, rows, permissions)"""
         try:
             # Invalidate caches first
             self.cache.invalidate_all_for_dataset(dataset_id)
 
-            # Delete dataset
+            # Delete dataset metadata
             query = f"DELETE FROM {self.keyspace}.datasets WHERE dataset_id = %s"
             self.db.execute(query, [dataset_id])
 
-            # Delete schema
-            query = f"DELETE FROM {self.keyspace}.dataset_schema WHERE dataset_id = %s"
-            self.db.execute(query, [dataset_id])
+            # Delete schema (versions + columns) via SchemaService
+            try:
+                self.schema_service.delete_schema(dataset_id)
+            except Exception as e:
+                logger.warning(f"Failed to delete schema for {dataset_id}: {e}")
 
-            # Delete dynamic table
+            # Delete all batches via BatchService
+            try:
+                self.batch_service.delete_all_batches(dataset_id)
+            except Exception as e:
+                logger.warning(f"Failed to delete batches for {dataset_id}: {e}")
+
+            # Delete dynamic row table
             table_name = self._get_table_name(dataset_id)
             try:
                 query = f"DROP TABLE IF EXISTS {self.keyspace}.{table_name}"
@@ -336,21 +370,48 @@ class DatasetService:
             raise DatabaseException(f"Failed to delete dataset: {str(e)}")
 
     def insert_rows(
-        self, dataset_id: UUID, rows: List[Dict[str, Any]], chunk_size: int = 10000,
+        self,
+        dataset_id: UUID,
+        rows: List[Dict[str, Any]],
+        chunk_size: int = 10000,
         batch_size: int = 50,
+        batch_id: Optional[UUID] = None,
+        batch_date: Optional[datetime] = None,
+        uploaded_by: str = "",
+        file_format: str = "csv",
+        size_bytes: int = 0,
     ) -> int:
-        """Insert rows into dataset using batched writes for throughput"""
+        """Insert rows into dataset using batched writes.
+
+        Creates a batch entry and evolves schema automatically.
+        """
         try:
             from cassandra.query import BatchStatement, SimpleStatement, BatchType
+
+            now = datetime.utcnow()
+            batch_date = batch_date or now
+
+            # Create batch entry if not provided
+            if batch_id is None:
+                batch_id = self.batch_service.create_batch(
+                    dataset_id=dataset_id,
+                    batch_date=batch_date,
+                    file_format=file_format,
+                    size_bytes=size_bytes,
+                    uploaded_by=uploaded_by,
+                )
 
             inserted_count = 0
             table_name = self._get_table_name(dataset_id)
 
-            # Ensure table exists before insertion, using the first row for schema
+            # Ensure table exists and evolve schema
+            schema_version = 0
             if rows:
                 self._ensure_table_exists(dataset_id, table_name, rows[0])
-                # Infer and set schema metadata
-                self.set_dataset_schema(dataset_id, rows[0])
+                # Evolve schema (creates v1 on first upload, diffs on subsequent)
+                schema_version = self.schema_service.evolve_schema(
+                    dataset_id, rows[0], batch_id
+                )
 
             for chunk_id, i in enumerate(range(0, len(rows), chunk_size)):
                 chunk = rows[i : i + chunk_size]
@@ -358,13 +419,11 @@ class DatasetService:
                 batch_count = 0
 
                 for row_id, row_data in enumerate(chunk):
-                    # Build dynamic insert query
-                    cols = ["row_chunk_id", "row_id"]
-                    placeholders = ["%s", "%s"]
-                    values = [chunk_id, row_id]
+                    cols = ["batch_id", "row_chunk_id", "row_id"]
+                    placeholders = ["%s", "%s", "%s"]
+                    values = [batch_id, chunk_id, row_id]
 
                     for col_name, val in row_data.items():
-                        # Handle nulls
                         if val is None or (isinstance(val, float) and math.isnan(val)):
                             continue
                         cols.append(self._sanitize_col_name(col_name))
@@ -373,94 +432,82 @@ class DatasetService:
 
                     stmt = SimpleStatement(f"""
                         INSERT INTO {self.keyspace}.{table_name}
-                        ({", ".join(cols)})
-                        VALUES ({", ".join(placeholders)})
+                        ({', '.join(cols)})
+                        VALUES ({', '.join(placeholders)})
                     """)
                     batch.add(stmt, values)
                     batch_count += 1
                     inserted_count += 1
 
-                    # Flush batch when it reaches batch_size
                     if batch_count >= batch_size:
                         self.db.execute(batch)
                         batch = BatchStatement(batch_type=BatchType.UNLOGGED)
                         batch_count = 0
 
-                # Flush remaining rows in batch
                 if batch_count > 0:
                     self.db.execute(batch)
 
-            # Update row count
+            # Update dataset metadata
+            total_batches = self.batch_service.count_batches(dataset_id)
             query = f"""
                 UPDATE {self.keyspace}.datasets
-                SET row_count = %s, updated_at = %s
+                SET row_count = %s, updated_at = %s,
+                    latest_batch_id = %s, latest_batch_date = %s,
+                    total_batches = %s, schema_version = %s
                 WHERE dataset_id = %s
             """
-            self.db.execute(query, [inserted_count, datetime.utcnow(), dataset_id])
+            self.db.execute(query, [
+                inserted_count, now, batch_id, batch_date,
+                total_batches, schema_version, dataset_id,
+            ])
+
+            # Update batch status
+            self.batch_service.update_batch_status(
+                dataset_id, batch_id, batch_date,
+                status="ready",
+                row_count=inserted_count,
+                schema_version=schema_version,
+            )
 
             # Invalidate caches
             self.cache.invalidate_all_for_dataset(dataset_id)
 
-            logger.info(f"Inserted {inserted_count} rows into dataset {dataset_id}")
+            logger.info(
+                f"Inserted {inserted_count} rows into dataset {dataset_id} "
+                f"(batch={batch_id}, schema_v={schema_version})"
+            )
             return inserted_count
         except Exception as e:
             logger.error(f"Failed to insert rows: {e}")
+            # Mark batch as failed
+            if batch_id:
+                try:
+                    self.batch_service.update_batch_status(
+                        dataset_id, batch_id, batch_date or datetime.utcnow(),
+                        status="failed",
+                    )
+                except Exception:
+                    pass
             raise DatabaseException(f"Failed to insert rows: {str(e)}")
 
-    def set_dataset_schema(self, dataset_id: UUID, sample_row: Dict[str, Any]):
-        """Infer and set dataset schema based on a sample row"""
-        try:
-            for col_name, value in sample_row.items():
-                col_type = type(value).__name__
-                query = f"""
-                    INSERT INTO {self.keyspace}.dataset_schema
-                    (dataset_id, column_name, column_type)
-                    VALUES (%s, %s, %s)
-                """
-                self.db.execute(query, [dataset_id, col_name, col_type])
-            logger.info(f"Set schema for dataset {dataset_id}")
-        except Exception as e:
-            logger.error(f"Failed to set schema: {e}")
+    # ── Schema / Masking delegation ───────────────────────────────────
+    # These thin wrappers delegate to SchemaService for backward compat.
 
     def get_dataset_schema(self, dataset_id: UUID) -> List[Dict[str, Any]]:
-        """Get dataset schema and masking rules"""
-        try:
-            query = f"""
-                SELECT column_name, column_type, masking_rule
-                FROM {self.keyspace}.dataset_schema
-                WHERE dataset_id = %s
-            """
-            result = self.db.execute(query, [dataset_id])
-            return [
-                {
-                    "name": row.column_name,
-                    "type": row.column_type,
-                    "mask_rule": row.masking_rule,
-                    "masked": bool(row.masking_rule)
-                }
-                for row in result
-            ]
-        except Exception as e:
-            logger.error(f"Failed to get schema: {e}")
-            raise DatabaseException(f"Failed to get schema: {str(e)}")
+        """Get dataset schema columns (latest version, active only)."""
+        return self.schema_service.get_schema(dataset_id)
 
-    def update_masking_rule(self, dataset_id: UUID, column_name: str, mask_rule: Optional[str]):
-        """Update masking rule for a specific column and sync to dataset metadata"""
+    def update_masking_rule(
+        self, dataset_id: UUID, column_name: str, mask_rule: Optional[str]
+    ):
+        """Update masking rule and sync to dataset metadata."""
         try:
-            # 1. Update dataset_schema table (using quoted column name for safety)
-            query = f"""
-                UPDATE {self.keyspace}.dataset_schema
-                SET "masking_rule" = %s
-                WHERE dataset_id = %s AND column_name = %s
-            """
-            self.db.execute(query, [mask_rule, dataset_id, column_name])
+            # 1. Update schema column
+            self.schema_service.update_masking_rule(dataset_id, column_name, mask_rule)
 
             # 2. Sync to masking_config in datasets table
-            # We fetch once and update once
             dataset = self.get_dataset(dataset_id)
             config = dataset.get("masking_config", {})
-            
-            # Ensure it's a dict and not None
             if not isinstance(config, dict):
                 config = {}
 
@@ -469,10 +516,9 @@ class DatasetService:
             else:
                 config.pop(column_name, None)
 
-            # Update the main metadata
             self.update_dataset(dataset_id, masking_config=config)
 
-            # 3. Invalidate row caches since masking changed
+            # 3. Invalidate row caches
             self.cache.invalidate_dataset(dataset_id)
 
             logger.info(f"Updated masking rule for {dataset_id}:{column_name} to {mask_rule}")
@@ -490,6 +536,7 @@ class DatasetService:
         user_role: str = "viewer",
         columns: Optional[List[str]] = None,
         apply_masking: bool = True,
+        batch_id: Optional[UUID] = None,
     ) -> Tuple[List[Dict[str, Any]], int]:
         """Get paginated rows from dataset with optional masking (cached)"""
         try:
@@ -508,21 +555,52 @@ class DatasetService:
             dataset = self.get_dataset(dataset_id)
             masking_config = dataset.get("masking_config", {})
 
+            # Check table schema FIRST to decide query strategy
+            table_name = self._get_table_name(dataset_id)
+            use_legacy_query = not self._table_has_batch_id(table_name)
+
+            # Resolve batch_id — only relevant for new-format tables
+            if not use_legacy_query and batch_id is None:
+                latest_batch = self.batch_service.get_latest_batch(dataset_id)
+                if latest_batch:
+                    batch_id = latest_batch["batch_id"]
+                else:
+                    # New table format but no batches yet — no data
+                    return [], 0
+
             # Get schema to map storage names back to original names
-            schema = self.get_dataset_schema(dataset_id)
-            name_map = {self._sanitize_col_name(s["name"]): s["name"] for s in schema}
-            reverse_map = {s["name"]: self._sanitize_col_name(s["name"]) for s in schema}
+            schema = []
+            try:
+                schema = self.schema_service.get_schema(dataset_id)
+            except Exception:
+                # Legacy schema table might have different PK — try direct query
+                try:
+                    legacy_query = f"""
+                        SELECT column_name, column_type, position, mask_rule
+                        FROM {self.keyspace}.dataset_schema
+                        WHERE dataset_id = %s
+                    """
+                    result = self.db.execute(legacy_query, [dataset_id])
+                    schema = [
+                        {"name": row.column_name, "type": getattr(row, "column_type", "str")}
+                        for row in result
+                    ]
+                except Exception:
+                    schema = []
+            name_map = {self._sanitize_col_name(s["name"]): s["name"] for s in schema} if schema else {}
+            reverse_map = {s["name"]: self._sanitize_col_name(s["name"]) for s in schema} if schema else {}
 
             # Calculate which chunks to fetch
             offset = (page - 1) * page_size
             chunk_id = offset // 10000
             start_row = offset % 10000
 
-            table_name = self._get_table_name(dataset_id)
+
 
             # Column-level SQL: select only requested columns if specified
             if columns:
-                safe_cols = ["row_chunk_id", "row_id"]
+                base_cols = ["batch_id", "row_chunk_id", "row_id"] if not use_legacy_query else ["row_chunk_id", "row_id"]
+                safe_cols = list(base_cols)
                 for col in columns:
                     safe_name = reverse_map.get(col, self._sanitize_col_name(col))
                     if safe_name not in safe_cols:
@@ -531,17 +609,29 @@ class DatasetService:
             else:
                 select_clause = "*"
 
-            query = f"""
-                SELECT {select_clause}
-                FROM {self.keyspace}.{table_name}
-                WHERE row_chunk_id = %s
-                ORDER BY row_id ASC
-                LIMIT %s
-            """
-
-            result = self.db.execute(
-                query, [chunk_id, page_size + start_row]
-            )
+            if use_legacy_query:
+                # Legacy table (no batch_id column)
+                query = f"""
+                    SELECT {select_clause}
+                    FROM {self.keyspace}.{table_name}
+                    WHERE row_chunk_id = %s
+                    ORDER BY row_id ASC
+                    LIMIT %s
+                """
+                result = self.db.execute(
+                    query, [chunk_id, page_size + start_row]
+                )
+            else:
+                query = f"""
+                    SELECT {select_clause}
+                    FROM {self.keyspace}.{table_name}
+                    WHERE batch_id = %s AND row_chunk_id = %s
+                    ORDER BY row_id ASC
+                    LIMIT %s
+                """
+                result = self.db.execute(
+                    query, [batch_id, chunk_id, page_size + start_row]
+                )
             rows = list(result)[start_row : start_row + page_size]
 
             processed_rows = []
@@ -549,7 +639,7 @@ class DatasetService:
                 # Reconstruct row data from columns
                 row_dict = {}
                 for field in row._fields:
-                    if field in ["row_chunk_id", "row_id"]:
+                    if field in ["batch_id", "row_chunk_id", "row_id"]:
                         continue
                     orig_name = name_map.get(field, field)
                     row_dict[orig_name] = getattr(row, field)
@@ -589,25 +679,69 @@ class DatasetService:
         """Export dataset to CSV, JSON, or Parquet format"""
         try:
             dataset = self.get_dataset(dataset_id)
-
-            # Get all rows (in production, this would be paginated)
             table_name = self._get_table_name(dataset_id)
-            query = f"SELECT * FROM {self.keyspace}.{table_name}"
-            result = self.db.execute(query)
-            
-            # Get schema for mapping
-            schema = self.get_dataset_schema(dataset_id)
-            name_map = {self._sanitize_col_name(s["name"]): s["name"] for s in schema}
-            
-            rows = []
-            for row in result:
-                row_dict = {}
-                for field in row._fields:
-                    if field in ["row_chunk_id", "row_id"]:
-                        continue
-                    orig_name = name_map.get(field, field)
-                    row_dict[orig_name] = getattr(row, field)
-                rows.append(row_dict)
+
+            # Check if this is a legacy (pre-batch) table
+            has_batch_id = self._table_has_batch_id(table_name)
+
+            if has_batch_id:
+                # New schema — resolve latest batch
+                latest_batch = self.batch_service.get_latest_batch(dataset_id)
+                if not latest_batch:
+                    return b""  # No data
+
+                batch_id = latest_batch["batch_id"]
+
+                # Fetch all rows for the latest batch across all chunks
+                query = f"SELECT * FROM {self.keyspace}.{table_name} WHERE batch_id = %s AND row_chunk_id = %s"
+                
+                # Get schema for mapping
+                try:
+                    schema = self.schema_service.get_schema(dataset_id)
+                    name_map = {self._sanitize_col_name(s["name"]): s["name"] for s in schema}
+                except Exception:
+                    name_map = {}
+                
+                rows = []
+                chunk_id = 0
+                while True:
+                    result = list(self.db.execute(query, [batch_id, chunk_id]))
+                    if not result:
+                        break
+                    for row in result:
+                        row_dict = {}
+                        for field in row._fields:
+                            if field in ["batch_id", "row_chunk_id", "row_id"]:
+                                continue
+                            orig_name = name_map.get(field, field)
+                            row_dict[orig_name] = getattr(row, field)
+                        rows.append(row_dict)
+                    chunk_id += 1
+            else:
+                # Legacy table — no batch_id column, use old query
+                query = f"SELECT * FROM {self.keyspace}.{table_name} WHERE row_chunk_id = %s"
+                
+                try:
+                    schema = self.schema_service.get_schema(dataset_id)
+                    name_map = {self._sanitize_col_name(s["name"]): s["name"] for s in schema}
+                except Exception:
+                    name_map = {}
+                
+                rows = []
+                chunk_id = 0
+                while True:
+                    result = list(self.db.execute(query, [chunk_id]))
+                    if not result:
+                        break
+                    for row in result:
+                        row_dict = {}
+                        for field in row._fields:
+                            if field in ["row_chunk_id", "row_id"]:
+                                continue
+                            orig_name = name_map.get(field, field)
+                            row_dict[orig_name] = getattr(row, field)
+                        rows.append(row_dict)
+                    chunk_id += 1
 
             masking_config = dataset.get("masking_config", {})
 

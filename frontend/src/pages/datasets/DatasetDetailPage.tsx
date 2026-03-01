@@ -38,6 +38,7 @@ import {
     ListItemText,
     ListItemSecondaryAction,
     Avatar,
+    Tooltip,
 } from '@mui/material';
 import {
     Download as DownloadIcon,
@@ -50,6 +51,9 @@ import {
     Share as ShareIcon,
     Refresh as RefreshIcon,
     ShieldOutlined as ShieldIcon,
+    History as HistoryIcon,
+    Layers as LayersIcon,
+    Schedule as ScheduleIcon,
 } from '@mui/icons-material';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import {
@@ -63,8 +67,12 @@ import {
     grantPermission,
     revokePermission,
     fetchSchema,
+    fetchSchemaHistory,
     updateMaskingRule,
     setRowsPagination,
+    fetchBatches,
+    deleteBatch,
+    setBatchesPagination,
 } from '../../store/slices/datasetsSlice';
 import { useSnackbar } from 'notistack';
 import LoadingSpinner from '../../components/common/LoadingSpinner';
@@ -95,6 +103,14 @@ function TabPanel(props: TabPanelProps) {
     );
 }
 
+const FREQ_LABELS: Record<string, { label: string; color: 'default' | 'primary' | 'secondary' | 'success' | 'info' | 'warning' }> = {
+    once: { label: 'One-time', color: 'default' },
+    hourly: { label: '⏱ Hourly', color: 'warning' },
+    daily: { label: '📅 Daily', color: 'info' },
+    weekly: { label: '📆 Weekly', color: 'primary' },
+    monthly: { label: '🗓 Monthly', color: 'secondary' },
+};
+
 const DatasetDetailPage: React.FC = () => {
     const { id } = useParams<{ id: string }>();
     const navigate = useNavigate();
@@ -105,7 +121,10 @@ const DatasetDetailPage: React.FC = () => {
         currentDatasetRows,
         currentDatasetPermissions,
         currentDatasetSchema,
+        currentDatasetBatches,
+        currentSchemaHistory,
         rowsPagination,
+        batchesPagination,
         loading,
         error,
     } = useAppSelector((state) => state.datasets);
@@ -120,12 +139,15 @@ const DatasetDetailPage: React.FC = () => {
     const [shareOpen, setShareOpen] = useState(false);
     const [shareEmail, setShareEmail] = useState('');
     const [shareRole, setShareRole] = useState<'contributor' | 'viewer'>('viewer');
+    const [schemaVersionFilter, setSchemaVersionFilter] = useState<number | ''>('');
 
     useEffect(() => {
         if (id) {
             dispatch(fetchDataset(id));
             dispatch(fetchDatasetRows({ datasetId: id, params: { ...rowsPagination } }));
-            dispatch(fetchSchema(id));
+            dispatch(fetchSchema({ datasetId: id }));
+            dispatch(fetchSchemaHistory(id));
+            dispatch(fetchBatches({ datasetId: id, params: { page: 1, page_size: 20 } }));
         }
         return () => {
             dispatch(clearCurrentDataset());
@@ -232,6 +254,28 @@ const DatasetDetailPage: React.FC = () => {
         }
     };
 
+    const handleDeleteBatch = async (batchId: string) => {
+        if (!id) return;
+        if (window.confirm('Delete this batch and its rows? This cannot be undone.')) {
+            try {
+                await dispatch(deleteBatch({ datasetId: id, batchId })).unwrap();
+                enqueueSnackbar('Batch deleted', { variant: 'success' });
+            } catch (err: any) {
+                enqueueSnackbar(err || 'Failed to delete batch', { variant: 'error' });
+            }
+        }
+    };
+
+    const handleSchemaVersionChange = (version: number | '') => {
+        setSchemaVersionFilter(version);
+        if (id) {
+            dispatch(fetchSchema({
+                datasetId: id,
+                version: version === '' ? undefined : version,
+            }));
+        }
+    };
+
     const formatBytes = (bytes: number): string => {
         if (bytes === 0) return '0 Bytes';
         const k = 1024;
@@ -273,6 +317,7 @@ const DatasetDetailPage: React.FC = () => {
     }
 
     const columns = (currentDatasetRows?.length || 0) > 0 ? Object.keys(currentDatasetRows[0]) : [];
+    const freqInfo = FREQ_LABELS[currentDataset.batch_frequency] || FREQ_LABELS['once'];
 
     return (
         <Container maxWidth="xl" sx={{ py: 4 }}>
@@ -299,6 +344,12 @@ const DatasetDetailPage: React.FC = () => {
                             {currentDataset.is_public && (
                                 <Chip label="Public" size="small" color="info" />
                             )}
+                            <Chip
+                                label={freqInfo.label}
+                                size="small"
+                                color={freqInfo.color}
+                                variant="outlined"
+                            />
                         </Stack>
                         <Typography variant="body1" color="text.secondary">
                             {currentDataset.description || 'No description provided.'}
@@ -306,18 +357,10 @@ const DatasetDetailPage: React.FC = () => {
                     </Box>
 
                     <Stack direction="row" spacing={1}>
-                        <Button
-                            variant="outlined"
-                            startIcon={<RefreshIcon />}
-                            onClick={handleRefresh}
-                        >
+                        <Button variant="outlined" startIcon={<RefreshIcon />} onClick={handleRefresh}>
                             Refresh
                         </Button>
-                        <Button
-                            variant="outlined"
-                            startIcon={<EditIcon />}
-                            onClick={() => setEditOpen(true)}
-                        >
+                        <Button variant="outlined" startIcon={<EditIcon />} onClick={() => setEditOpen(true)}>
                             Edit
                         </Button>
                         <Button
@@ -358,10 +401,12 @@ const DatasetDetailPage: React.FC = () => {
                                 <Tab label="Data Preview" />
                                 <Tab label="Analytics" />
                                 <Tab label="Schema" />
+                                <Tab label={`Batches (${currentDataset.total_batches || batchesPagination.total || 0})`} />
                                 <Tab label="Lineage & Usage" />
                             </Tabs>
                         </Box>
 
+                        {/* Tab 0: Data Preview */}
                         <TabPanel value={tabValue} index={0}>
                             {(currentDatasetRows?.length || 0) > 0 ? (
                                 <>
@@ -432,14 +477,35 @@ const DatasetDetailPage: React.FC = () => {
                             )}
                         </TabPanel>
 
+                        {/* Tab 1: Analytics */}
                         <TabPanel value={tabValue} index={1}>
                             <DataVisualization dataset={currentDataset} rows={currentDatasetRows} />
                         </TabPanel>
 
+                        {/* Tab 2: Schema */}
                         <TabPanel value={tabValue} index={2}>
-                            <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                <Typography variant="h6" fontWeight="bold">Dataset Schema & Masking</Typography>
-                                <Chip label={`${currentDatasetSchema?.length || 0} Columns`} color="primary" variant="outlined" size="small" />
+                            <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 2 }}>
+                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                                    <Typography variant="h6" fontWeight="bold">Dataset Schema & Masking</Typography>
+                                    <Chip label={`${currentDatasetSchema?.length || 0} Columns`} color="primary" variant="outlined" size="small" />
+                                </Box>
+                                {currentSchemaHistory.length > 1 && (
+                                    <FormControl size="small" sx={{ minWidth: 180 }}>
+                                        <InputLabel>Schema Version</InputLabel>
+                                        <Select
+                                            value={schemaVersionFilter}
+                                            label="Schema Version"
+                                            onChange={(e) => handleSchemaVersionChange(e.target.value as number | '')}
+                                        >
+                                            <MenuItem value="">Latest</MenuItem>
+                                            {currentSchemaHistory.map((v) => (
+                                                <MenuItem key={v.version} value={v.version}>
+                                                    v{v.version} — {v.change_summary || `${v.column_count} cols`}
+                                                </MenuItem>
+                                            ))}
+                                        </Select>
+                                    </FormControl>
+                                )}
                             </Box>
 
                             <Alert severity="info" sx={{ mb: 3 }}>
@@ -452,13 +518,20 @@ const DatasetDetailPage: React.FC = () => {
                                         <TableRow>
                                             <TableCell sx={{ fontWeight: 'bold' }}>Column Name</TableCell>
                                             <TableCell sx={{ fontWeight: 'bold' }}>Type</TableCell>
-                                            <TableCell sx={{ fontWeight: 'bold' }}>Masking Rule</TableCell>
                                             <TableCell sx={{ fontWeight: 'bold' }}>Status</TableCell>
+                                            <TableCell sx={{ fontWeight: 'bold' }}>Masking Rule</TableCell>
+                                            <TableCell sx={{ fontWeight: 'bold' }}>Protection</TableCell>
                                         </TableRow>
                                     </TableHead>
                                     <TableBody>
                                         {(currentDatasetSchema || []).map((col) => (
-                                            <TableRow key={col.name}>
+                                            <TableRow
+                                                key={col.name}
+                                                sx={{
+                                                    opacity: col.is_active === false ? 0.5 : 1,
+                                                    textDecoration: col.is_active === false ? 'line-through' : 'none',
+                                                }}
+                                            >
                                                 <TableCell sx={{ py: 1.5 }}>
                                                     <Typography variant="body2" fontWeight="medium">{col.name}</Typography>
                                                 </TableCell>
@@ -466,9 +539,17 @@ const DatasetDetailPage: React.FC = () => {
                                                     <Chip label={col.type} size="small" variant="outlined" sx={{ fontSize: '0.7rem' }} />
                                                 </TableCell>
                                                 <TableCell>
+                                                    {col.is_active === false ? (
+                                                        <Chip label="Dropped" size="small" color="error" variant="outlined" />
+                                                    ) : (
+                                                        <Chip label="Active" size="small" color="success" variant="outlined" />
+                                                    )}
+                                                </TableCell>
+                                                <TableCell>
                                                     <FormControl size="small" fullWidth sx={{ maxWidth: 200 }}>
                                                         <Select
                                                             value={col.mask_rule || 'none'}
+                                                            disabled={col.is_active === false}
                                                             onChange={(e) => {
                                                                 const val = e.target.value;
                                                                 handleUpdateMasking(col.name, val === 'none' ? null : val);
@@ -503,7 +584,114 @@ const DatasetDetailPage: React.FC = () => {
                             </TableContainer>
                         </TabPanel>
 
+                        {/* Tab 3: Batches */}
                         <TabPanel value={tabValue} index={3}>
+                            <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <Typography variant="h6" fontWeight="bold">
+                                    <LayersIcon sx={{ mr: 1, verticalAlign: 'middle' }} />
+                                    Data Batches
+                                </Typography>
+                                <Chip
+                                    label={`${batchesPagination.total} batches`}
+                                    color="primary"
+                                    variant="outlined"
+                                    size="small"
+                                />
+                            </Box>
+
+                            {currentDatasetBatches.length > 0 ? (
+                                <TableContainer component={Paper} variant="outlined">
+                                    <Table size="small">
+                                        <TableHead sx={{ bgcolor: 'action.hover' }}>
+                                            <TableRow>
+                                                <TableCell sx={{ fontWeight: 'bold' }}>Batch Date</TableCell>
+                                                <TableCell sx={{ fontWeight: 'bold' }}>Rows</TableCell>
+                                                <TableCell sx={{ fontWeight: 'bold' }}>Size</TableCell>
+                                                <TableCell sx={{ fontWeight: 'bold' }}>Schema v.</TableCell>
+                                                <TableCell sx={{ fontWeight: 'bold' }}>Status</TableCell>
+                                                <TableCell sx={{ fontWeight: 'bold' }}>Uploaded By</TableCell>
+                                                <TableCell sx={{ fontWeight: 'bold' }} />
+                                            </TableRow>
+                                        </TableHead>
+                                        <TableBody>
+                                            {currentDatasetBatches.map((batch) => (
+                                                <TableRow key={batch.batch_id} hover>
+                                                    <TableCell>{formatDate(batch.batch_date)}</TableCell>
+                                                    <TableCell>{(batch.row_count || 0).toLocaleString()}</TableCell>
+                                                    <TableCell>{formatBytes(batch.size_bytes || 0)}</TableCell>
+                                                    <TableCell>
+                                                        <Chip label={`v${batch.schema_version}`} size="small" variant="outlined" />
+                                                    </TableCell>
+                                                    <TableCell>
+                                                        <Chip
+                                                            label={batch.status}
+                                                            size="small"
+                                                            color={batch.status === 'ready' ? 'success' : batch.status === 'failed' ? 'error' : 'warning'}
+                                                            variant="outlined"
+                                                        />
+                                                    </TableCell>
+                                                    <TableCell>
+                                                        <Typography variant="caption">{batch.uploaded_by}</Typography>
+                                                    </TableCell>
+                                                    <TableCell>
+                                                        <Tooltip title="Delete batch">
+                                                            <IconButton
+                                                                size="small"
+                                                                color="error"
+                                                                onClick={() => handleDeleteBatch(batch.batch_id)}
+                                                            >
+                                                                <DeleteIcon fontSize="small" />
+                                                            </IconButton>
+                                                        </Tooltip>
+                                                    </TableCell>
+                                                </TableRow>
+                                            ))}
+                                        </TableBody>
+                                    </Table>
+                                </TableContainer>
+                            ) : (
+                                <Paper variant="outlined" sx={{ p: 4, textAlign: 'center', bgcolor: 'grey.50' }}>
+                                    <Typography color="text.secondary">No batches recorded yet.</Typography>
+                                </Paper>
+                            )}
+
+                            {batchesPagination.pages > 1 && (
+                                <Box sx={{ display: 'flex', justifyContent: 'center', mt: 2, gap: 1 }}>
+                                    <Button
+                                        size="small"
+                                        variant="outlined"
+                                        disabled={batchesPagination.page <= 1}
+                                        onClick={() => {
+                                            if (!id) return;
+                                            const newPage = batchesPagination.page - 1;
+                                            dispatch(setBatchesPagination({ page: newPage }));
+                                            dispatch(fetchBatches({ datasetId: id, params: { page: newPage, page_size: 20 } }));
+                                        }}
+                                    >
+                                        Previous
+                                    </Button>
+                                    <Typography variant="body2" sx={{ alignSelf: 'center' }}>
+                                        Page {batchesPagination.page} of {batchesPagination.pages}
+                                    </Typography>
+                                    <Button
+                                        size="small"
+                                        variant="outlined"
+                                        disabled={batchesPagination.page >= batchesPagination.pages}
+                                        onClick={() => {
+                                            if (!id) return;
+                                            const newPage = batchesPagination.page + 1;
+                                            dispatch(setBatchesPagination({ page: newPage }));
+                                            dispatch(fetchBatches({ datasetId: id, params: { page: newPage, page_size: 20 } }));
+                                        }}
+                                    >
+                                        Next
+                                    </Button>
+                                </Box>
+                            )}
+                        </TabPanel>
+
+                        {/* Tab 4: Lineage & Usage */}
+                        <TabPanel value={tabValue} index={4}>
                             <Typography variant="h6" gutterBottom fontWeight="bold">Lineage & Usage</Typography>
                             <Paper variant="outlined" sx={{ p: 4, textAlign: 'center', bgcolor: 'grey.50' }}>
                                 <Typography color="text.secondary">
@@ -514,6 +702,7 @@ const DatasetDetailPage: React.FC = () => {
                     </Paper>
                 </Grid>
 
+                {/* Sidebar */}
                 <Grid size={{ xs: 12, md: 4 }}>
                     <Paper sx={{ p: 3, borderRadius: 2, mb: 3 }}>
                         <Typography variant="h6" gutterBottom fontWeight="bold">
@@ -566,6 +755,67 @@ const DatasetDetailPage: React.FC = () => {
                                     {currentDataset.row_count.toLocaleString()}
                                 </Typography>
                             </Box>
+
+                            <Divider />
+
+                            {/* Batch info */}
+                            <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                                <ScheduleIcon sx={{ mr: 2, color: 'text.secondary' }} />
+                                <Box>
+                                    <Typography variant="caption" color="text.secondary" display="block">
+                                        Ingestion Frequency
+                                    </Typography>
+                                    <Chip
+                                        label={freqInfo.label}
+                                        size="small"
+                                        color={freqInfo.color}
+                                        variant="outlined"
+                                    />
+                                </Box>
+                            </Box>
+
+                            <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                                <LayersIcon sx={{ mr: 2, color: 'text.secondary' }} />
+                                <Box>
+                                    <Typography variant="caption" color="text.secondary" display="block">
+                                        Total Batches
+                                    </Typography>
+                                    <Typography variant="body2" fontWeight="medium">
+                                        {currentDataset.total_batches || 0}
+                                    </Typography>
+                                </Box>
+                            </Box>
+
+                            <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                                <HistoryIcon sx={{ mr: 2, color: 'text.secondary' }} />
+                                <Box>
+                                    <Typography variant="caption" color="text.secondary" display="block">
+                                        Schema Version
+                                    </Typography>
+                                    <Typography variant="body2" fontWeight="medium">
+                                        v{currentDataset.schema_version || 1}
+                                        {currentSchemaHistory.length > 1 && (
+                                            <Typography variant="caption" color="text.secondary" component="span" sx={{ ml: 1 }}>
+                                                ({currentSchemaHistory.length} versions)
+                                            </Typography>
+                                        )}
+                                    </Typography>
+                                </Box>
+                            </Box>
+
+                            {currentDataset.latest_batch_date && (
+                                <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                                    <TimeIcon sx={{ mr: 2, color: 'text.secondary' }} />
+                                    <Box>
+                                        <Typography variant="caption" color="text.secondary" display="block">
+                                            Latest Batch
+                                        </Typography>
+                                        <Typography variant="body2">
+                                            {formatDate(currentDataset.latest_batch_date)}
+                                        </Typography>
+                                    </Box>
+                                </Box>
+                            )}
                         </Stack>
 
                         <Typography variant="subtitle2" sx={{ mt: 3, mb: 1 }}>
