@@ -18,10 +18,12 @@ from ..core.exceptions import (
     DatasetNotFoundException,
     DatasetAlreadyExistsException,
     DatabaseException,
+    InvalidFileFormatException,
 )
 from ..core.masking import DataMasker
 from ..core.config import settings
 from ..schemas.common import Role
+from .naming import dataset_table_name
 from .pagination_cache import PaginationCacheService, PageRequest
 from .schema_service import SchemaService
 from .batch_service import BatchService
@@ -43,25 +45,41 @@ class DatasetService:
         self.schema_service = SchemaService()
         self.batch_service = BatchService()
 
+    # Common CQL reserved words a real-world column name is plausibly named
+    # after (not an exhaustive grammar — Normal #17's gap is columns like
+    # "select"/"token"/"key" producing invalid/ambiguous CQL, not full
+    # keyword coverage).
+    _CQL_RESERVED_WORDS = {
+        "select", "insert", "update", "delete", "from", "where", "table",
+        "keyspace", "keyspaces", "tables", "columnfamily", "key", "token",
+        "order", "by", "limit", "allow", "filtering", "create", "drop",
+        "alter", "grant", "revoke", "and", "or", "not", "null", "true",
+        "false", "set", "index", "primary", "into", "values", "use",
+        "with", "if", "exists", "in", "like", "contains", "add", "apply",
+        "batch", "begin", "truncate", "timeuuid", "uuid", "counter", "map",
+        "list", "frozen", "static", "text", "int", "bigint", "boolean",
+        "double", "float",
+    }
+
     def _get_table_name(self, dataset_id: UUID) -> str:
         """Generate a safe Cassandra table name from dataset ID"""
-        # Cassandra table names should be alphanumeric with underscores
-        # UUIDs are safe if we prefix them and replace hyphens
-        return f"ds_rows_{str(dataset_id).replace('-', '_')}"
+        return dataset_table_name(dataset_id)
 
     def _get_cassandra_type(self, value: Any) -> str:
         """Map Python types to Cassandra types"""
-        if isinstance(value, int):
+        if isinstance(value, bool):
+            return "BOOLEAN"
+        elif isinstance(value, int):
             return "BIGINT"
         elif isinstance(value, float):
             return "DOUBLE"
-        elif isinstance(value, bool):
-            return "BOOLEAN"
         else:
             return "TEXT"
 
     def _sanitize_col_name(self, col_name: str) -> str:
-        """Sanitize column name for Cassandra (alphanumeric and underscores)"""
+        """Sanitize a single column name for Cassandra (alphanumeric and
+        underscores). Stateless — no collision or reserved-word handling;
+        use `_sanitize_columns` for a whole batch, which adds both."""
         if not col_name:
             return "unknown_col"
         # Replace non-alphanumeric with underscore, lowercase everything
@@ -70,41 +88,133 @@ class DatasetService:
             safe = f"col_{safe}"
         return safe
 
-    def _ensure_table_exists(self, dataset_id: UUID, table_name: str, sample_row: Optional[Dict[str, Any]] = None):
-        """Ensure the specific table for the dataset exists with structured columns"""
+    def _sanitize_columns(self, col_names: List[str]) -> Dict[str, str]:
+        """Sanitize a batch of column names together.
+
+        `_sanitize_col_name` alone can map distinct names to the same
+        physical column (e.g. "Col-1", "Col_1", "COL 1" all sanitize to
+        "col_1"), which previously either broke `CREATE TABLE` or silently
+        overwrote one logical column's value with another's on every insert
+        (Mandatory #17). Computing the whole batch's mapping up front lets
+        us detect that collision and fail fast with a clear message instead.
+
+        Also suffixes CQL reserved words so a column literally named
+        "select"/"token"/"key" doesn't produce invalid/ambiguous CQL
+        (Normal #17).
+        """
+        result: Dict[str, str] = {}
+        claimed_by: Dict[str, str] = {}
+        for original in col_names:
+            safe = self._sanitize_col_name(original)
+            if safe in self._CQL_RESERVED_WORDS:
+                safe = f"{safe}_col"
+            if safe in claimed_by and claimed_by[safe] != original:
+                raise InvalidFileFormatException(
+                    f"Column names '{claimed_by[safe]}' and '{original}' both sanitize "
+                    f"to the same physical column '{safe}' — rename one of them."
+                )
+            claimed_by[safe] = original
+            result[original] = safe
+        return result
+
+    def _get_physical_columns(self, table_name: str) -> Optional[set]:
+        """Return the physical column names of a ds_rows_* table, or None if
+        the table doesn't exist yet."""
+        exists_query = (
+            f"SELECT table_name FROM system_schema.tables "
+            f"WHERE keyspace_name = '{self.keyspace}' AND table_name = '{table_name}'"
+        )
+        if not self.db.execute(exists_query).one():
+            return None
+        cols_query = (
+            f"SELECT column_name FROM system_schema.columns "
+            f"WHERE keyspace_name = '{self.keyspace}' AND table_name = '{table_name}'"
+        )
+        return {row.column_name for row in self.db.execute(cols_query)}
+
+    def _ensure_table_exists(
+        self,
+        dataset_id: UUID,
+        table_name: str,
+        sample_row: Optional[Dict[str, Any]],
+        col_map: Dict[str, str],
+    ):
+        """Ensure the specific table for the dataset exists with structured
+        columns, and ALTER TABLE ADD any genuinely new columns a later batch
+        introduces that the original CREATE TABLE didn't have.
+
+        `sample_row` must already be the union of every row's columns in the
+        batch being inserted (see `_merge_batch_sample`), not just the first
+        row — using only `rows[0]` meant a later row in the same batch with
+        extra/different columns referenced a physical column that was never
+        added, failing mid-batch (Mandatory #18). `col_map` must come from
+        `_sanitize_columns` over that same union, so collisions are caught
+        before any DDL/DML runs.
+        """
         try:
-            # Check if table already exists
-            check_query = f"SELECT table_name FROM system_schema.tables WHERE keyspace_name = '{self.keyspace}' AND table_name = '{table_name}'"
-            if self.db.execute(check_query).one():
+            existing_cols = self._get_physical_columns(table_name)
+
+            if existing_cols is None:
+                columns = ["batch_id UUID", "row_chunk_id INT", "row_id BIGINT"]
+                if sample_row:
+                    for col_name, value in sample_row.items():
+                        columns.append(f"{col_map[col_name]} {self._get_cassandra_type(value)}")
+                else:
+                    # Fallback if no sample row (should not happen with new flow)
+                    columns.append("row_data TEXT")
+
+                query = f"""
+                    CREATE TABLE IF NOT EXISTS {self.keyspace}.{table_name} (
+                        {", ".join(columns)},
+                        PRIMARY KEY ((batch_id, row_chunk_id), row_id)
+                    ) WITH CLUSTERING ORDER BY (row_id ASC);
+                """
+                self.db.execute(query)
+                logger.info(f"Created structured table {table_name} for dataset {dataset_id}")
                 return
 
-            # Base columns — batch_id is part of the composite partition key
-            columns = [
-                "batch_id UUID",
-                "row_chunk_id INT",
-                "row_id BIGINT"
-            ]
-            
+            # Table already exists — add any columns this batch introduces
+            # that weren't part of the original CREATE TABLE.
             if sample_row:
                 for col_name, value in sample_row.items():
-                    safe_name = self._sanitize_col_name(col_name)
-                    cass_type = self._get_cassandra_type(value)
-                    columns.append(f"{safe_name} {cass_type}")
-            else:
-                # Fallback if no sample row (should not happen with new flow)
-                columns.append("row_data TEXT")
-
-            query = f"""
-                CREATE TABLE IF NOT EXISTS {self.keyspace}.{table_name} (
-                    {", ".join(columns)},
-                    PRIMARY KEY ((batch_id, row_chunk_id), row_id)
-                ) WITH CLUSTERING ORDER BY (row_id ASC);
-            """
-            self.db.execute(query)
-            logger.info(f"Created structured table {table_name} for dataset {dataset_id}")
+                    safe_name = col_map[col_name]
+                    if safe_name in existing_cols:
+                        continue
+                    try:
+                        self.db.execute(
+                            f"ALTER TABLE {self.keyspace}.{table_name} "
+                            f"ADD {safe_name} {self._get_cassandra_type(value)}"
+                        )
+                        logger.info(f"Added column {safe_name} to {table_name}")
+                    except Exception as e:
+                        logger.warning(f"Could not add column {safe_name} to {table_name}: {e}")
+        except InvalidFileFormatException:
+            raise
         except Exception as e:
-            logger.error(f"Failed to create table {table_name}: {e}")
-            raise DatabaseException(f"Failed to create storage for dataset: {str(e)}")
+            logger.error(f"Failed to create/evolve table {table_name}: {e}")
+            raise DatabaseException(f"Failed to create/evolve storage for dataset: {str(e)}")
+
+    @staticmethod
+    def _merge_batch_sample(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Union of column keys across every row in a batch, each mapped to
+        a representative (first non-null) value.
+
+        Previously schema/table inference used only `rows[0]`, so a later
+        row in the same batch with extra or different columns referenced a
+        physical column that was never added — a Cassandra error mid-batch,
+        leaving a partially-inserted, inconsistent batch (Mandatory #18).
+        This builds the one representative row that `_ensure_table_exists`
+        and `SchemaService.evolve_schema` need to see every column the
+        batch will ever reference, atomically, before any row is written.
+        """
+        merged: Dict[str, Any] = {}
+        for row in rows:
+            for key, value in row.items():
+                if key not in merged:
+                    merged[key] = value
+                elif merged[key] is None and value is not None:
+                    merged[key] = value
+        return merged
 
     def _table_has_batch_id(self, table_name: str) -> bool:
         """Check if a ds_rows_* table has the batch_id column (new schema)."""
@@ -128,24 +238,31 @@ class DatasetService:
         file_format: str = "csv",
         size_bytes: int = 0,
         status: str = "ready",
-        masking_config: Optional[Dict[str, str]] = None,
         batch_frequency: str = "once",
     ) -> UUID:
-        """Create a new dataset with batch tracking fields"""
+        """Create a new dataset with batch tracking fields.
+
+        No `masking_config` parameter: at creation time no schema exists yet
+        (it's created on first `insert_rows`), so there was never anything
+        to apply masking rules to here — the `datasets.masking_config` JSON
+        blob this used to write was dead weight nothing ever read back
+        (Normal #12's single-source-of-truth decision, folded into M6 per
+        the M5 handoff note). Pass `masking_config` to `insert_rows` instead,
+        which is where it can actually land on real schema columns.
+        """
         try:
             dataset_id = uuid4()
             created_at = datetime.utcnow()
             tags_str = self._format_tags(tags)
 
             query = f"""
-                INSERT INTO {self.keyspace}.datasets 
+                INSERT INTO {self.keyspace}.datasets
                 (dataset_id, name, description, owner, tags, is_public,
                  created_at, updated_at, row_count, size_bytes, file_format,
-                 status, masking_config, batch_frequency, total_batches, schema_version)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 status, batch_frequency, total_batches, schema_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
 
-            masking_config_json = json.dumps(masking_config or {})
             self.db.execute(
                 query,
                 [
@@ -161,7 +278,6 @@ class DatasetService:
                     size_bytes,
                     file_format,
                     status,
-                    masking_config_json,
                     batch_frequency,
                     0,
                     0,
@@ -181,8 +297,8 @@ class DatasetService:
         """Get dataset metadata"""
         try:
             query = f"""
-                SELECT dataset_id, name, description, owner, tags, is_public, 
-                       created_at, updated_at, row_count, size_bytes, file_format, status, masking_config
+                SELECT dataset_id, name, description, owner, tags, is_public,
+                       created_at, updated_at, row_count, size_bytes, file_format, status
                 FROM {self.keyspace}.datasets
                 WHERE dataset_id = %s
             """
@@ -192,10 +308,6 @@ class DatasetService:
 
             if not row:
                 raise DatasetNotFoundException(f"Dataset {dataset_id} not found")
-
-            masking_config = (
-                json.loads(row.masking_config) if row.masking_config else {}
-            )
 
             return {
                 "id": row.dataset_id,
@@ -210,7 +322,6 @@ class DatasetService:
                 "size_bytes": getattr(row, "size_bytes", 0),
                 "file_format": getattr(row, "file_format", "csv"),
                 "status": getattr(row, "status", "ready"),
-                "masking_config": masking_config,
             }
         except DatasetNotFoundException:
             raise
@@ -302,23 +413,37 @@ class DatasetService:
             raise DatabaseException(f"Failed to list datasets: {str(e)}")
 
     def update_dataset(self, dataset_id: UUID, **updates) -> Dict[str, Any]:
-        """Update dataset metadata"""
+        """Update dataset metadata.
+
+        `masking_config` (column_name -> mask_rule) is handled specially: it
+        is no longer a column on this table. `dataset_schema.masking_rule`
+        (via SchemaService) is the single source of truth for masking as of
+        Module 5's Normal #12 fix, so each entry here is applied as a
+        per-column masking-rule update through SchemaService instead of
+        being written to the now-dead `datasets.masking_config` blob — this
+        bulk-update path and the dedicated per-column masking endpoint
+        (`PATCH /datasets/{id}/schema/{column}/masking`) can't diverge again.
+        """
         try:
-            # Get current dataset
+            # Get current dataset (also 404s if it doesn't exist)
             dataset = self.get_dataset(dataset_id)
+
+            masking_updates = updates.pop("masking_config", None)
+            if masking_updates is not None:
+                if not isinstance(masking_updates, dict):
+                    raise InvalidFileFormatException(
+                        "masking_config must be a mapping of column_name -> mask_rule"
+                    )
+                for column_name, mask_rule in masking_updates.items():
+                    self.schema_service.update_masking_rule(dataset_id, column_name, mask_rule or None)
+                self.cache.invalidate_dataset(dataset_id)
 
             # Build update query
             update_fields = []
             values = []
 
             for key, value in updates.items():
-                if key == "masking_config":
-                    # Unquoted, consistent with every other field here —
-                    # masking_config isn't a CQL reserved word, so the quoting
-                    # was never needed.
-                    update_fields.append("masking_config = %s")
-                    values.append(json.dumps(value))
-                elif key == "tags":
+                if key == "tags":
                     update_fields.append("tags = %s")
                     values.append(self._format_tags(value))
                 elif key in ["name", "description", "is_public"]:
@@ -326,7 +451,7 @@ class DatasetService:
                     values.append(value)
 
             if not update_fields:
-                return dataset
+                return self.get_dataset(dataset_id) if masking_updates else dataset
 
             update_fields.append("updated_at = %s")
             values.append(datetime.utcnow())
@@ -345,7 +470,7 @@ class DatasetService:
             self.cache.invalidate_all_for_dataset(dataset_id)
 
             return self.get_dataset(dataset_id)
-        except DatasetNotFoundException:
+        except (DatasetNotFoundException, InvalidFileFormatException, DatabaseException):
             raise
         except Exception as e:
             logger.error(f"Failed to update dataset: {e}")
@@ -405,10 +530,16 @@ class DatasetService:
         uploaded_by: str = "",
         file_format: str = "csv",
         size_bytes: int = 0,
+        masking_config: Optional[Dict[str, str]] = None,
     ) -> int:
         """Insert rows into dataset using batched writes.
 
         Creates a batch entry and evolves schema automatically.
+
+        `masking_config` (column_name -> mask_rule) is only applied if this
+        call ends up creating the dataset's very first schema version — see
+        SchemaService.create_schema. It has no effect on later batches,
+        which evolve an already-existing schema instead.
         """
         try:
             from cassandra.query import BatchStatement, SimpleStatement, BatchType
@@ -429,13 +560,28 @@ class DatasetService:
             inserted_count = 0
             table_name = self._get_table_name(dataset_id)
 
-            # Ensure table exists and evolve schema
+            # Ensure table exists and evolve schema. Column set and
+            # sanitized-name map are computed from the union of every row in
+            # the batch, not just rows[0] (Mandatory #18), and collisions
+            # across that whole batch are caught before any DDL/DML runs
+            # (Mandatory #17).
             schema_version = 0
+            col_map: Dict[str, str] = {}
             if rows:
-                self._ensure_table_exists(dataset_id, table_name, rows[0])
+                all_col_names: List[str] = []
+                seen_names = set()
+                for row in rows:
+                    for key in row.keys():
+                        if key not in seen_names:
+                            seen_names.add(key)
+                            all_col_names.append(key)
+                col_map = self._sanitize_columns(all_col_names)
+
+                merged_sample = self._merge_batch_sample(rows)
+                self._ensure_table_exists(dataset_id, table_name, merged_sample, col_map)
                 # Evolve schema (creates v1 on first upload, diffs on subsequent)
                 schema_version = self.schema_service.evolve_schema(
-                    dataset_id, rows[0], batch_id
+                    dataset_id, merged_sample, batch_id, masking_config=masking_config
                 )
 
             for chunk_id, i in enumerate(range(0, len(rows), chunk_size)):
@@ -451,7 +597,7 @@ class DatasetService:
                     for col_name, val in row_data.items():
                         if val is None or (isinstance(val, float) and math.isnan(val)):
                             continue
-                        cols.append(self._sanitize_col_name(col_name))
+                        cols.append(col_map[col_name])
                         placeholders.append("%s")
                         values.append(val)
 
@@ -516,12 +662,13 @@ class DatasetService:
                     pass
             raise DatabaseException(f"Failed to insert rows: {str(e)}")
 
-    # ── Schema / Masking delegation ───────────────────────────────────
-    # These thin wrappers delegate to SchemaService for backward compat.
-
-    def get_dataset_schema(self, dataset_id: UUID) -> List[Dict[str, Any]]:
-        """Get dataset schema columns (latest version, active only)."""
-        return self.schema_service.get_schema(dataset_id)
+    # ── Masking delegation ──────────────────────────────────────────────
+    # `get_dataset_schema` (a pure pass-through to schema_service.get_schema
+    # with zero callers — Normal #15) was removed here: Module 5 already
+    # made the schema the single source of masking truth, so there was no
+    # metadata left to merge and no reason left for this method to exist.
+    # Callers use SchemaService directly, e.g. app/api/datasets.py's
+    # get_dataset_schema route already calls schema_service.get_schema().
 
     def update_masking_rule(
         self, dataset_id: UUID, column_name: str, mask_rule: Optional[str]

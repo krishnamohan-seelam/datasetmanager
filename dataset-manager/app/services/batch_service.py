@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 from ..cassandra_client import CassandraClient
 from ..core.config import settings
 from ..core.exceptions import DatabaseException
+from .naming import dataset_table_name
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +178,7 @@ class BatchService:
                 return False
 
             # Delete rows for this batch from the row table (composite PK)
-            table_name = f"ds_rows_{str(dataset_id).replace('-', '_')}"
+            table_name = dataset_table_name(dataset_id)
             try:
                 # With composite PK (batch_id, row_chunk_id), delete chunk by chunk
                 chunk_id = 0
@@ -232,17 +233,25 @@ class BatchService:
             raise DatabaseException(f"Failed to delete all batches: {str(e)}")
 
     def count_batches(self, dataset_id: UUID) -> int:
-        """Count total batches for a dataset."""
+        """Count total batches for a dataset.
+
+        Same bug, same file family as SchemaService._get_latest_version
+        (Mandatory #14): previously swallowed every exception into 0,
+        making a transient Cassandra error indistinguishable from "no
+        batches yet" and feeding a wrong total_batches into dataset
+        metadata. Only an empty result means "no batches" now; a real
+        infrastructure error propagates as a DatabaseException.
+        """
+        query = f"""
+            SELECT COUNT(*) as cnt
+            FROM {self.keyspace}.dataset_batches
+            WHERE dataset_id = %s
+        """
         try:
-            query = f"""
-                SELECT COUNT(*) as cnt
-                FROM {self.keyspace}.dataset_batches
-                WHERE dataset_id = %s
-            """
             row = self.db.execute(query, [dataset_id]).one()
-            return row.cnt if row else 0
-        except Exception:
-            return 0
+        except Exception as e:
+            raise DatabaseException(f"Failed to count batches for {dataset_id}: {e}")
+        return row.cnt if row else 0
 
     # ── Internal helpers ─────────────────────────────────────────────
 

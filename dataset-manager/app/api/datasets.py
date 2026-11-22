@@ -2,6 +2,7 @@
 Datasets router — CRUD, schema, masking, and batch endpoints.
 """
 
+import json
 import math
 import uuid
 from datetime import datetime
@@ -54,6 +55,7 @@ async def upload_dataset(
     is_public: bool = Form(False),
     batch_frequency: str = Form("once"),
     batch_date: Optional[str] = Form(None),
+    masking_config: Optional[str] = Form(None),
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user),
 ):
@@ -96,6 +98,18 @@ async def upload_dataset(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid batch_date format. Use ISO 8601.")
 
+    # Parse masking_config (column_name -> mask_rule). Only takes effect if
+    # this upload creates the dataset's very first schema version — see
+    # SchemaService.create_schema / DatasetService.insert_rows.
+    parsed_masking_config = None
+    if masking_config:
+        try:
+            parsed_masking_config = json.loads(masking_config)
+        except json.JSONDecodeError:
+            raise InvalidFileFormatException("masking_config must be valid JSON")
+        if not isinstance(parsed_masking_config, dict):
+            raise InvalidFileFormatException("masking_config must be a JSON object (column_name -> mask_rule)")
+
     # Create dataset metadata
     dataset_id = dataset_service.create_dataset(
         name=name,
@@ -118,6 +132,7 @@ async def upload_dataset(
         uploaded_by=current_user["email"],
         file_format=file_ext[1:],
         size_bytes=len(content),
+        masking_config=parsed_masking_config,
     )
 
     logger.info(f"Dataset {dataset_id} uploaded by {current_user['email']}")
