@@ -9,6 +9,7 @@ from datetime import datetime
 sys.path.append(os.getcwd())
 
 from app.services.dataset_service import DatasetService
+from app.services.pagination_cache import PageRequest
 from app.cassandra_client import CassandraClient
 from app.core.config import settings
 
@@ -50,7 +51,7 @@ def verify_refactor():
         return False
         
     # 4. Verify data can be retrieved
-    retrieved_rows, total = service.get_rows(dataset_id, page=1, page_size=10, user_role="admin")
+    retrieved_rows, total = service.get_rows(PageRequest(dataset_id=dataset_id, page=1, page_size=10, user_role="admin"))
     print(f"Retrieved {len(retrieved_rows)} rows (total: {total})")
     
     if len(retrieved_rows) == 3 and retrieved_rows[0]["name"] == "Alice":

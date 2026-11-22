@@ -30,8 +30,15 @@ permission_service = PermissionService()
 schema_service = SchemaService()
 batch_service = BatchService()
 
-# Database client (used directly for auth queries)
-db = CassandraClient([settings.CASSANDRA_HOST], settings.CASSANDRA_PORT)
+
+def get_db() -> CassandraClient:
+    """Return the shared Cassandra client, used directly for auth/admin
+    queries that don't go through a service. CassandraClient is itself a
+    singleton (see app/cassandra_client.py), so this doesn't open a new
+    connection — it just avoids constructing it as an import-time side
+    effect, which made this module harder to mock in tests. Call sites use
+    this instead of importing a module-level `db`."""
+    return CassandraClient([settings.CASSANDRA_HOST], settings.CASSANDRA_PORT)
 
 
 def parse_file_content(content: bytes, file_ext: str) -> List[dict]:

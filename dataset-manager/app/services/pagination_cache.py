@@ -3,17 +3,40 @@ Redis-backed Pagination Cache for Dataset Manager
 
 Caches paginated row results and dataset listings to avoid
 redundant Cassandra queries. Keys are scoped by dataset, page,
-page_size, and user role (since masking differs by role).
+page_size, user role, masking mode, batch, and a schema/masking revision.
+
+Ownership: this service owns ALL row-page and dataset-listing caching.
+``app.integrations.redis_cache.RedisCacheService`` is limited to
+dataset-metadata / user-listing / query-result caching and delegates its
+``invalidate_dataset`` here so one "dataset changed" signal clears both.
 """
 
 import hashlib
 import json
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PageRequest:
+    """A row-page read request (replaces the dataset_id/page/page_size/role/columns clump)."""
+
+    dataset_id: UUID
+    page: int = 1
+    page_size: int = 100
+    user_role: str = "viewer"
+    columns: Optional[Tuple[str, ...]] = None
+    apply_masking: bool = True
+    batch_id: Optional[UUID] = None
+
+    @property
+    def columns_key(self) -> Optional[str]:
+        return ",".join(sorted(self.columns)) if self.columns else None
 
 
 class PaginationCacheService:
@@ -63,12 +86,24 @@ class PaginationCacheService:
     # ── Key builders ────────────────────────────────────────────
 
     @staticmethod
-    def _rows_key(
-        dataset_id: UUID, page: int, page_size: int, role: str,
-        columns: Optional[str] = None,
-    ) -> str:
-        col_part = f":{columns}" if columns else ""
-        return f"rows:{dataset_id}:{page}:{page_size}:{role}{col_part}"
+    def _rows_key(req: "PageRequest", schema_rev: str = "") -> str:
+        """Build a row-page key.
+
+        Segments: dataset, page, page_size, role, masking mode, batch, and a
+        schema/masking revision fingerprint. ``apply_masking`` is part of the key
+        so a masked and an unmasked read can never share an entry; ``schema_rev``
+        changes whenever active columns or their masking rules change, so a stale
+        entry is unreachable even before explicit invalidation runs.
+        """
+        mask_part = "m1" if req.apply_masking else "m0"
+        batch_part = str(req.batch_id) if req.batch_id else "latest"
+        rev_part = schema_rev or "0"
+        col_key = req.columns_key
+        col_part = f":{col_key}" if col_key else ""
+        return (
+            f"rows:{req.dataset_id}:{req.page}:{req.page_size}:{req.user_role}"
+            f":{mask_part}:{batch_part}:{rev_part}{col_part}"
+        )
 
     @staticmethod
     def _datasets_list_key(page: int, page_size: int, search: Optional[str] = None) -> str:
@@ -78,19 +113,13 @@ class PaginationCacheService:
     # ── Row page cache ──────────────────────────────────────────
 
     def get_rows_page(
-        self,
-        dataset_id: UUID,
-        page: int,
-        page_size: int,
-        role: str,
-        columns: Optional[str] = None,
+        self, req: "PageRequest", schema_rev: str = ""
     ) -> Optional[Tuple[List[Dict[str, Any]], int]]:
         """Get cached rows page. Returns (rows, total) or None on miss."""
         if not self.enabled:
             return None
         try:
-            key = self._rows_key(dataset_id, page, page_size, role, columns)
-            raw = self.client.get(key)
+            raw = self.client.get(self._rows_key(req, schema_rev))
             if raw is None:
                 return None
             data = json.loads(raw)
@@ -101,20 +130,17 @@ class PaginationCacheService:
 
     def set_rows_page(
         self,
-        dataset_id: UUID,
-        page: int,
-        page_size: int,
-        role: str,
+        req: "PageRequest",
         rows: List[Dict[str, Any]],
         total: int,
-        columns: Optional[str] = None,
+        schema_rev: str = "",
         ttl: int = None,
     ) -> bool:
         """Cache a rows page result."""
         if not self.enabled:
             return False
         try:
-            key = self._rows_key(dataset_id, page, page_size, role, columns)
+            key = self._rows_key(req, schema_rev)
             payload = json.dumps({"rows": rows, "total": total}, default=str)
             self.client.setex(key, ttl or self.default_ttl, payload)
             return True
@@ -164,13 +190,12 @@ class PaginationCacheService:
 
     # ── Invalidation ────────────────────────────────────────────
 
-    def invalidate_dataset(self, dataset_id: UUID) -> int:
-        """Invalidate all cached row pages for a specific dataset."""
+    def _invalidate_pattern(self, pattern: str) -> int:
+        """Scan-and-delete every key matching ``pattern``. Returns count deleted."""
         if not self.enabled:
             return 0
         try:
             deleted = 0
-            pattern = f"rows:{dataset_id}:*"
             cursor = 0
             while True:
                 cursor, keys = self.client.scan(cursor, match=pattern, count=200)
@@ -178,31 +203,34 @@ class PaginationCacheService:
                     deleted += self.client.delete(*keys)
                 if cursor == 0:
                     break
-            logger.info(f"Invalidated {deleted} cache entries for dataset {dataset_id}")
             return deleted
         except Exception as e:
-            logger.warning(f"Cache invalidation failed for dataset {dataset_id}: {e}")
+            logger.warning(f"Cache invalidation failed for pattern {pattern}: {e}")
             return 0
+
+    def invalidate_dataset(self, dataset_id: UUID) -> int:
+        """Single "dataset rows/schema/masking changed" invalidation entrypoint.
+
+        Clears every cached row page for the dataset (all roles, masking modes,
+        batches, revisions, column selections). Every mutation that changes a
+        dataset's rows, schema, or masking must call this (or
+        ``invalidate_all_for_dataset``). Currently wired: ``DatasetService.insert_rows``
+        and ``DatasetService.update_masking_rule``; ``RedisCacheService.invalidate_dataset``
+        also delegates here.
+        TODO(Module 6): ``SchemaService.drop_column`` must call this.
+        TODO(Module 7): ``BatchService.delete_batch`` / ``delete_all_batches`` must call this.
+        """
+        deleted = self._invalidate_pattern(f"rows:{dataset_id}:*")
+        if self.enabled:
+            logger.info(f"Invalidated {deleted} cache entries for dataset {dataset_id}")
+        return deleted
 
     def invalidate_datasets_list(self) -> int:
         """Invalidate all cached dataset listings."""
-        if not self.enabled:
-            return 0
-        try:
-            deleted = 0
-            pattern = "datasets:list:*"
-            cursor = 0
-            while True:
-                cursor, keys = self.client.scan(cursor, match=pattern, count=200)
-                if keys:
-                    deleted += self.client.delete(*keys)
-                if cursor == 0:
-                    break
+        deleted = self._invalidate_pattern("datasets:list:*")
+        if self.enabled:
             logger.info(f"Invalidated {deleted} dataset list cache entries")
-            return deleted
-        except Exception as e:
-            logger.warning(f"Dataset list cache invalidation failed: {e}")
-            return 0
+        return deleted
 
     def invalidate_all_for_dataset(self, dataset_id: UUID) -> int:
         """Invalidate both row pages and dataset listings for a dataset."""

@@ -119,6 +119,11 @@ class PermissionService:
         Check user's permission level for dataset
 
         Returns: role ('admin', 'contributor', 'viewer', or None if denied)
+
+        `user_email` and `user_role` must come from a server-verified auth
+        context (i.e. resolved via `get_current_user` from the caller's JWT),
+        never from client-supplied input — this method trusts both at face
+        value and does no verification of its own.
         """
         # Global admin always has access
         if user_role == "admin":
@@ -143,7 +148,11 @@ class PermissionService:
     def is_dataset_accessible(
         self, dataset_id: UUID, user_email: str, dataset_owner: str, is_public: bool, user_role: str = None
     ) -> bool:
-        """Check if user can access dataset"""
+        """Check if user can access dataset.
+
+        Same trust requirement as check_permission: `user_email`/`user_role`
+        must come from a server-verified auth context, never client input.
+        """
         return (
             self.check_permission(dataset_id, user_email, dataset_owner, is_public, user_role)
             is not None

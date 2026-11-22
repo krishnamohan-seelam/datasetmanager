@@ -2,11 +2,11 @@
 
 A high-performance, scalable platform designed for managing, analyzing, and securing large-scale datasets. This platform features batch ingestion, schema versioning, dynamic data masking, and a robust ETL pipeline.
 
-
-
-**Note**: This is a work in progress, need to fix unit test failures also and I am using this project to learn about data engineering, data science, and software engineering.
+**Note**: This is a work in progress, need to fix unit test failures also and I am using this project to learn about data engineering, data science, and software engineering
 ---
+
 ## Tools used
+
 - VSCODE + Github Copilot
 - Google Antigravity
 - Docker
@@ -14,21 +14,20 @@ A high-performance, scalable platform designed for managing, analyzing, and secu
 
 ---
 
-##  Project Documentation
+## Project Documentation
 
-- **[Enhanced Product Requirements Document (PRD)](./Enhanced-PRD.md)**: Detailed specifications, system architecture, and project roadmap.
-- **[Feature Progress Update](./Feature-Progress.md)**: Current implementation status, completed milestones, and upcoming tasks.
+- **[Architecture Blueprint](./docs/architecture/README.md)**: The authoritative, code-derived description of the system — layered by architecture pattern (API, service, data, integration, cross-cutting concerns, ETL orchestration, frontend).
 
 ---
 
-*   **Dynamic Storage Engine**: Automatically creates per-dataset Cassandra tables with typed columns for optimized performance.
-*   **Batch Ingestion**: Support for one-time, hourly, daily, weekly, and monthly data batches with per-batch isolation and management.
-*   **Schema Versioning**: Automatic schema evolution with version history, soft-deleted columns, and diff-based change tracking.
-*   **Privacy-First Analytics**: Context-aware data masking (Email, SSN, Phone, CC + 7 more rules) that automatically adapts based on user roles.
-*   **Advanced Visualization**: Real-time data quality metrics and distributions powered by Recharts.
-*   **Event-Driven Architecture**: Fully integrated with Apache Kafka for real-time audit logging and system events.
-*   **Scalable ETL Pipeline**: Apache Airflow DAGs for automated dataset validation and ingestion.
-*   **Multi-Backend Storage**: Support for AWS S3, local MinIO, and flat-file storage via a factory pattern.
+- **Dynamic Storage Engine**: Automatically creates per-dataset Cassandra tables with typed columns for optimized performance.
+- **Batch Ingestion**: Support for one-time, hourly, daily, weekly, and monthly data batches with per-batch isolation and management.
+- **Schema Versioning**: Automatic schema evolution with version history, soft-deleted columns, and diff-based change tracking.
+- **Privacy-First Analytics**: Context-aware data masking (Email, SSN, Phone, CC + 7 more rules) that automatically adapts based on user roles.
+- **Advanced Visualization**: Real-time data quality metrics and distributions powered by Recharts.
+- **Event-Driven Architecture**: Fully integrated with Apache Kafka for real-time audit logging and system events.
+- **Scalable ETL Pipeline**: Apache Airflow DAGs for automated dataset validation and ingestion.
+- **Multi-Backend Storage**: Support for AWS S3, local MinIO, and flat-file storage via a factory pattern.
 
 ---
 
@@ -47,6 +46,7 @@ A high-performance, scalable platform designed for managing, analyzing, and secu
 ## 🛠️ Technical Stack
 
 ### **Backend**
+
 - **Framework**: FastAPI (Python 3.10+)
 - **Database**: Apache Cassandra (structured per-dataset tables)
 - **Task Queue**: Apache Airflow
@@ -56,6 +56,7 @@ A high-performance, scalable platform designed for managing, analyzing, and secu
 - **Testing**: Pytest
 
 ### **Frontend**
+
 - **Framework**: React 18 with TypeScript
 - **State Management**: Redux Toolkit
 - **UI Library**: Material UI (MUI)
@@ -99,9 +100,8 @@ datasetmanager/
 │   │   └── theme/                # MUI theme customization
 │   └── Dockerfile
 │
-├── Planning/                     # Architecture & design docs
-├── Enhanced-PRD.md               # Product Requirements Document
-├── FEATURE_PROGRESS_UPDATE.md    # Release progress tracker
+├── docs/architecture/             # Code-derived architecture blueprint (source of truth)
+├── Planning/                      # Historical PRD, release summaries & status reports (archive)
 └── README.md
 ```
 
@@ -112,22 +112,27 @@ datasetmanager/
 The entire platform is containerized and can be launched with a single command. This includes the application services (Backend & Frontend) and all infrastructure dependencies.
 
 ### **Quick Start with Docker**
-1.  **Build and Start**:
+
+1. **Build and Start**:
+
     ```bash
     docker-compose up --build -d
     ```
-2.  **Initialize Database**:
+
+2. **Initialize Database**:
     Wait for Cassandra to be healthy (approx. 60s), then run:
+
     ```bash
     docker-compose exec fastapi poetry run python scripts/init_cassandra.py
     ```
 
 ### **Service Access**
+
 | Service | URL | Note |
-|:---|:---|:---|
+| :--- | :--- | :--- |
 | **Frontend** | `http://localhost:5173` | Main Web UI |
 | **API Backend** | `http://localhost:8000` | API Documentation at `/docs` |
-| **MinIO Console**| `http://localhost:9001` | Object Storage Browser |
+| **MinIO Console** | `http://localhost:9001` | Object Storage Browser |
 | **Cassandra** | `localhost:9042` | Primary Database |
 | **Redis** | `localhost:6379` | Cache Layer |
 | **Kafka** | `localhost:9092` | Event Streaming |
@@ -137,17 +142,21 @@ The entire platform is containerized and can be launched with a single command. 
 ## 🚦 Local Development (Manual)
 
 ### **Prerequisites**
+
 - Python 3.10+ & Poetry
 - Node.js 18+ & npm
 - Docker (for infrastructure only)
 
 ### **1. Infrastructure Setup**
+
 Start only the dependencies (Cassandra, Kafka, Redis, MinIO):
+
 ```bash
 docker-compose up -d cassandra kafka redis minio
 ```
 
 ### **2. Backend Setup**
+
 ```bash
 cd dataset-manager
 poetry install
@@ -158,11 +167,13 @@ poetry run uvicorn app.main:app --reload
 ```
 
 ### **3. Frontend Setup**
+
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
+
 The application will be available at `http://localhost:5173`.
 
 ---
@@ -170,6 +181,7 @@ The application will be available at `http://localhost:5173`.
 ## 🛡️ Security & Privacy
 
 This platform implements a robust security model:
+
 - **RBAC**: Role-Based Access Control (Admin, Owner, Viewer).
 - **Data Masking**: Automatic redacting of sensitive fields for non-admin users.
 - **Audit Trails**: Every data access and modification is logged to Kafka for compliance.

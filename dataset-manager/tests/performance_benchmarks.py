@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from uuid import UUID
 from io import BytesIO
 from app.main import app
+from app.services.pagination_cache import PageRequest
 
 @pytest.fixture
 def client():
@@ -404,7 +405,7 @@ class TestPaginationCachePerformance:
 
     @pytest.fixture
     def cache_service(self):
-        from app.services.pagination_cache import PaginationCacheService
+        from app.services.pagination_cache import PaginationCacheService, PageRequest
         return PaginationCacheService()
 
     def test_cache_set_latency(self, benchmark, cache_service):
@@ -414,7 +415,7 @@ class TestPaginationCachePerformance:
         rows = [{"name": f"User {i}", "email": f"u{i}@test.com"} for i in range(100)]
 
         def run_test():
-            return cache_service.set_rows_page(dataset_id, 1, 100, "viewer", rows, 5000)
+            return cache_service.set_rows_page(PageRequest(dataset_id=dataset_id, page=1, page_size=100), rows, 5000)
 
         result = benchmark(run_test)
         # Should return True if Redis connected, False if disabled
@@ -425,10 +426,10 @@ class TestPaginationCachePerformance:
         from uuid import uuid4
         dataset_id = uuid4()
         rows = [{"name": f"User {i}"} for i in range(100)]
-        cache_service.set_rows_page(dataset_id, 1, 100, "viewer", rows, 5000)
+        cache_service.set_rows_page(PageRequest(dataset_id=dataset_id, page=1, page_size=100), rows, 5000)
 
         def run_test():
-            return cache_service.get_rows_page(dataset_id, 1, 100, "viewer")
+            return cache_service.get_rows_page(PageRequest(dataset_id=dataset_id, page=1, page_size=100))
 
         result = benchmark(run_test)
         if cache_service.enabled:
@@ -441,7 +442,7 @@ class TestPaginationCachePerformance:
         from uuid import uuid4
 
         def run_test():
-            return cache_service.get_rows_page(uuid4(), 999, 100, "viewer")
+            return cache_service.get_rows_page(PageRequest(dataset_id=uuid4(), page=999, page_size=100))
 
         result = benchmark(run_test)
         assert result is None
@@ -453,7 +454,7 @@ class TestPaginationCachePerformance:
         # Pre-populate several pages
         for page in range(1, 21):
             cache_service.set_rows_page(
-                dataset_id, page, 100, "viewer",
+                PageRequest(dataset_id=dataset_id, page=page, page_size=100),
                 [{"x": i} for i in range(100)], 50000
             )
 
@@ -465,7 +466,7 @@ class TestPaginationCachePerformance:
 
     def test_cache_throughput(self):
         """Measure cache operations throughput (ops/sec)"""
-        from app.services.pagination_cache import PaginationCacheService
+        from app.services.pagination_cache import PaginationCacheService, PageRequest
         from uuid import uuid4
 
         cache = PaginationCacheService()
@@ -479,13 +480,13 @@ class TestPaginationCachePerformance:
         # Write throughput
         for i in range(100):
             tracker.start()
-            cache.set_rows_page(dataset_id, i + 1, 50, "viewer", rows, 5000)
+            cache.set_rows_page(PageRequest(dataset_id=dataset_id, page=i + 1, page_size=50), rows, 5000)
             tracker.end("cache_write")
 
         # Read throughput
         for i in range(100):
             tracker.start()
-            cache.get_rows_page(dataset_id, i + 1, 50, "viewer")
+            cache.get_rows_page(PageRequest(dataset_id=dataset_id, page=i + 1, page_size=50))
             tracker.end("cache_read")
 
         write_stats = tracker.get_stats("cache_write")

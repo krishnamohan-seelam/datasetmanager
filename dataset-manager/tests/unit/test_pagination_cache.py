@@ -7,7 +7,11 @@ import pytest
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-from app.services.pagination_cache import PaginationCacheService
+from app.services.pagination_cache import PaginationCacheService, PageRequest
+
+
+def _req(dataset_id, page=1, page_size=100, role="viewer", **kw):
+    return PageRequest(dataset_id=dataset_id, page=page, page_size=page_size, user_role=role, **kw)
 
 
 class TestPaginationCacheService:
@@ -48,7 +52,7 @@ class TestPaginationCacheService:
         mock_redis.client.get.return_value = None
         dataset_id = uuid4()
 
-        result = mock_redis.get_rows_page(dataset_id, 1, 100, "viewer")
+        result = mock_redis.get_rows_page(_req(dataset_id))
 
         assert result is None
         mock_redis.client.get.assert_called_once()
@@ -59,7 +63,7 @@ class TestPaginationCacheService:
         cached_data = {"rows": [{"name": "Alice"}], "total": 50}
         mock_redis.client.get.return_value = json.dumps(cached_data)
 
-        result = mock_redis.get_rows_page(dataset_id, 1, 100, "viewer")
+        result = mock_redis.get_rows_page(_req(dataset_id))
 
         assert result is not None
         rows, total = result
@@ -71,7 +75,7 @@ class TestPaginationCacheService:
         dataset_id = uuid4()
         rows = [{"name": "Bob"}, {"name": "Carol"}]
 
-        success = mock_redis.set_rows_page(dataset_id, 1, 100, "viewer", rows, 200)
+        success = mock_redis.set_rows_page(_req(dataset_id), rows, 200)
 
         assert success is True
         mock_redis.client.setex.assert_called_once()
@@ -82,7 +86,7 @@ class TestPaginationCacheService:
         """Setting rows cache with custom TTL"""
         dataset_id = uuid4()
 
-        mock_redis.set_rows_page(dataset_id, 1, 100, "admin", [{"x": 1}], 10, ttl=60)
+        mock_redis.set_rows_page(_req(dataset_id, role="admin"), [{"x": 1}], 10, ttl=60)
 
         args = mock_redis.client.setex.call_args
         assert args[0][1] == 60
@@ -91,7 +95,7 @@ class TestPaginationCacheService:
         """Cache key includes columns parameter"""
         dataset_id = uuid4()
 
-        mock_redis.get_rows_page(dataset_id, 1, 100, "viewer", columns="email,name")
+        mock_redis.get_rows_page(_req(dataset_id, columns=("name", "email")))
 
         key_arg = mock_redis.client.get.call_args[0][0]
         assert "email,name" in key_arg
@@ -175,12 +179,12 @@ class TestPaginationCacheService:
 
     def test_disabled_cache_returns_none(self, disabled_cache):
         """Disabled cache always returns None on get"""
-        result = disabled_cache.get_rows_page(uuid4(), 1, 100, "viewer")
+        result = disabled_cache.get_rows_page(_req(uuid4()))
         assert result is None
 
     def test_disabled_cache_set_returns_false(self, disabled_cache):
         """Disabled cache set returns False"""
-        result = disabled_cache.set_rows_page(uuid4(), 1, 100, "viewer", [], 0)
+        result = disabled_cache.set_rows_page(_req(uuid4()), [], 0)
         assert result is False
 
     def test_disabled_cache_invalidate_returns_zero(self, disabled_cache):
@@ -195,20 +199,41 @@ class TestCacheKeyGeneration:
     def test_rows_key_format(self):
         """Row key contains all parameters"""
         dataset_id = uuid4()
-        key = PaginationCacheService._rows_key(dataset_id, 2, 50, "admin")
-        assert f"rows:{dataset_id}:2:50:admin" == key
+        key = PaginationCacheService._rows_key(_req(dataset_id, 2, 50, "admin"), "abc")
+        assert f"rows:{dataset_id}:2:50:admin:m1:latest:abc" == key
 
     def test_rows_key_with_columns(self):
         """Row key includes column suffix"""
         dataset_id = uuid4()
-        key = PaginationCacheService._rows_key(dataset_id, 1, 100, "viewer", "email,name")
+        key = PaginationCacheService._rows_key(_req(dataset_id, columns=("name", "email")))
         assert key.endswith(":email,name")
 
     def test_rows_key_role_isolation(self):
         """Different roles produce different cache keys"""
         dataset_id = uuid4()
-        k1 = PaginationCacheService._rows_key(dataset_id, 1, 100, "admin")
-        k2 = PaginationCacheService._rows_key(dataset_id, 1, 100, "viewer")
+        k1 = PaginationCacheService._rows_key(_req(dataset_id, role="admin"))
+        k2 = PaginationCacheService._rows_key(_req(dataset_id))
+        assert k1 != k2
+
+    def test_rows_key_masking_isolation(self):
+        """apply_masking True/False never share a key (Mandatory #12)"""
+        dataset_id = uuid4()
+        k1 = PaginationCacheService._rows_key(_req(dataset_id, apply_masking=True))
+        k2 = PaginationCacheService._rows_key(_req(dataset_id, apply_masking=False))
+        assert k1 != k2
+
+    def test_rows_key_schema_revision_isolation(self):
+        """A schema/masking revision change changes the key"""
+        dataset_id = uuid4()
+        k1 = PaginationCacheService._rows_key(_req(dataset_id), "rev1")
+        k2 = PaginationCacheService._rows_key(_req(dataset_id), "rev2")
+        assert k1 != k2
+
+    def test_rows_key_batch_isolation(self):
+        """Explicit batch reads don't share the latest-batch key"""
+        dataset_id = uuid4()
+        k1 = PaginationCacheService._rows_key(_req(dataset_id))
+        k2 = PaginationCacheService._rows_key(_req(dataset_id, batch_id=uuid4()))
         assert k1 != k2
 
     def test_datasets_list_key_search_isolation(self):

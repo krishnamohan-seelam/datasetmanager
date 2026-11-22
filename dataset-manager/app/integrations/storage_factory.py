@@ -8,6 +8,8 @@ import os
 from typing import Optional, BinaryIO, Union
 from enum import Enum
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,7 +29,7 @@ def get_storage_service():
     Returns:
         StorageService instance (S3 or Local)
     """
-    backend = os.getenv("STORAGE_BACKEND", "minio").lower()
+    backend = settings.STORAGE_BACKEND.lower()
 
     if backend == StorageBackend.LOCAL:
         logger.info("Using Local Filesystem storage backend")
@@ -40,13 +42,14 @@ def get_storage_service():
         from .s3_storage import S3StorageService
 
         if backend == StorageBackend.MINIO:
-            # MinIO configuration
+            # MinIO configuration — no hardcoded fallback; Settings already
+            # fails startup outside development if these are unset.
             return S3StorageService(
-                endpoint_url=os.getenv("MINIO_ENDPOINT", "http://localhost:9000"),
-                aws_access_key_id=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
-                aws_secret_access_key=os.getenv("MINIO_SECRET_KEY", "minioadmin"),
-                bucket_name=os.getenv("MINIO_BUCKET_NAME", "dataset-manager-storage"),
-                use_ssl=os.getenv("MINIO_SECURE", "False").lower() == "true",
+                endpoint_url=settings.MINIO_ENDPOINT,
+                aws_access_key_id=settings.MINIO_ACCESS_KEY,
+                aws_secret_access_key=settings.MINIO_SECRET_KEY,
+                bucket_name=settings.MINIO_BUCKET_NAME,
+                use_ssl=settings.MINIO_SECURE,
             )
         else:
             # AWS S3 configuration

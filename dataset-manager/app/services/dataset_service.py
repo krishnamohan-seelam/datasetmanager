@@ -4,6 +4,7 @@ Dataset management service
 
 import json
 import csv
+import hashlib
 import logging
 import math
 import re
@@ -20,7 +21,8 @@ from ..core.exceptions import (
 )
 from ..core.masking import DataMasker
 from ..core.config import settings
-from .pagination_cache import PaginationCacheService
+from ..schemas.common import Role
+from .pagination_cache import PaginationCacheService, PageRequest
 from .schema_service import SchemaService
 from .batch_service import BatchService
 
@@ -219,7 +221,20 @@ class DatasetService:
     def list_datasets(
         self, page: int = 1, page_size: int = 100, search: Optional[str] = None
     ) -> Tuple[List[Dict[str, Any]], int]:
-        """List datasets with pagination and optional search (cached)"""
+        """List datasets with pagination and optional search (cached).
+
+        Previously this always ran `LIMIT 1000` and paginated/summed in
+        Python, so any page past the 1000th row silently returned
+        empty/wrong data and `total` undercounted once the real dataset
+        count exceeded 1000. Fixed here by scaling the scan to the requested
+        page (so paging deep into a >1000-row table still returns real data)
+        and computing `total` from an actual `COUNT(*)`, not `len(all_rows)`.
+
+        Search still requires a full scan — Cassandra has no server-side
+        text search here without a secondary index — but that scan is no
+        longer capped at a hardcoded 1000 rows, so results and the reported
+        total are no longer silently wrong past that cap.
+        """
         try:
             # Check cache first
             cached = self.cache.get_datasets_list(page, page_size, search)
@@ -227,30 +242,38 @@ class DatasetService:
                 logger.debug(f"Cache hit for datasets list page={page}")
                 return cached
 
-            # Cache miss — query Cassandra
-            query = f"""
-                SELECT dataset_id, name, description, owner, tags, is_public, 
-                       created_at, updated_at, row_count, size_bytes, file_format, status
-                FROM {self.keyspace}.datasets
-                LIMIT 1000
-            """
+            offset = (page - 1) * page_size
+            select_cols = (
+                "dataset_id, name, description, owner, tags, is_public, "
+                "created_at, updated_at, row_count, size_bytes, file_format, status"
+            )
 
-            result = self.db.execute(query)
-            all_rows = list(result)
-
-            # Filter by search if provided
             if search:
+                # Full scan is unavoidable for a substring search without an
+                # index, but it's no longer bounded at 1000 rows.
+                query = f"SELECT {select_cols} FROM {self.keyspace}.datasets"
+                all_rows = list(self.db.execute(query))
+
                 search_lower = search.lower()
-                all_rows = [
+                matched_rows = [
                     row
                     for row in all_rows
                     if (row.name and search_lower in row.name.lower())
                     or (row.description and search_lower in row.description.lower())
                 ]
+                total = len(matched_rows)
+                paginated_rows = matched_rows[offset : offset + page_size]
+            else:
+                # Scan exactly as far as this page needs rather than a fixed
+                # cap, so page N is always reachable regardless of table size.
+                scan_limit = offset + page_size
+                query = f"SELECT {select_cols} FROM {self.keyspace}.datasets LIMIT {scan_limit}"
+                paginated_rows = list(self.db.execute(query))[offset : offset + page_size]
 
-            # Apply pagination
-            offset = (page - 1) * page_size
-            paginated_rows = all_rows[offset : offset + page_size]
+                count_row = self.db.execute(
+                    f"SELECT COUNT(*) as count FROM {self.keyspace}.datasets"
+                ).one()
+                total = count_row.count if count_row else 0
 
             datasets = [
                 {
@@ -270,7 +293,6 @@ class DatasetService:
                 for row in paginated_rows
             ]
 
-            total = len(all_rows)
             # Store in cache
             self.cache.set_datasets_list(page, page_size, datasets, total, search)
 
@@ -291,7 +313,10 @@ class DatasetService:
 
             for key, value in updates.items():
                 if key == "masking_config":
-                    update_fields.append("\"masking_config\" = %s")
+                    # Unquoted, consistent with every other field here —
+                    # masking_config isn't a CQL reserved word, so the quoting
+                    # was never needed.
+                    update_fields.append("masking_config = %s")
                     values.append(json.dumps(value))
                 elif key == "tags":
                     update_fields.append("tags = %s")
@@ -469,8 +494,9 @@ class DatasetService:
                 schema_version=schema_version,
             )
 
-            # Invalidate caches
-            self.cache.invalidate_all_for_dataset(dataset_id)
+            # Invalidate caches: row pages (single entrypoint) + dataset listings
+            self.cache.invalidate_dataset(dataset_id)
+            self.cache.invalidate_datasets_list()
 
             logger.info(
                 f"Inserted {inserted_count} rows into dataset {dataset_id} "
@@ -500,25 +526,18 @@ class DatasetService:
     def update_masking_rule(
         self, dataset_id: UUID, column_name: str, mask_rule: Optional[str]
     ):
-        """Update masking rule and sync to dataset metadata."""
+        """Update a column's masking rule.
+
+        ``dataset_schema.masking_rule`` (via SchemaService) is the single source
+        of truth for masking; ``datasets.masking_config`` is no longer written by
+        this path nor read on the row/export path (Normal #12).
+        """
         try:
-            # 1. Update schema column
+            self.get_dataset(dataset_id)  # 404 if the dataset doesn't exist
             self.schema_service.update_masking_rule(dataset_id, column_name, mask_rule)
 
-            # 2. Sync to masking_config in datasets table
-            dataset = self.get_dataset(dataset_id)
-            config = dataset.get("masking_config", {})
-            if not isinstance(config, dict):
-                config = {}
-
-            if mask_rule:
-                config[column_name] = mask_rule
-            else:
-                config.pop(column_name, None)
-
-            self.update_dataset(dataset_id, masking_config=config)
-
-            # 3. Invalidate row caches
+            # The masking change also changes the cache key (schema revision),
+            # but clear eagerly so stale entries don't linger until TTL.
             self.cache.invalidate_dataset(dataset_id)
 
             logger.info(f"Updated masking rule for {dataset_id}:{column_name} to {mask_rule}")
@@ -528,89 +547,133 @@ class DatasetService:
                 raise
             raise DatabaseException(f"Failed to update masking rule: {str(e)}")
 
-    def get_rows(
-        self,
-        dataset_id: UUID,
-        page: int = 1,
-        page_size: int = 100,
-        user_role: str = "viewer",
-        columns: Optional[List[str]] = None,
-        apply_masking: bool = True,
-        batch_id: Optional[UUID] = None,
-    ) -> Tuple[List[Dict[str, Any]], int]:
-        """Get paginated rows from dataset with optional masking (cached)"""
-        try:
-            # Build columns key for cache
-            col_key = ",".join(sorted(columns)) if columns else None
+    # ── Read-path helpers ─────────────────────────────────────────────
 
-            # Check cache first
-            cached = self.cache.get_rows_page(
-                dataset_id, page, page_size, user_role, col_key
-            )
+    def _active_schema(self, dataset_id: UUID) -> List[Dict[str, Any]]:
+        """Active (non-soft-deleted) schema columns, with legacy-table fallback."""
+        try:
+            schema = self.schema_service.get_schema(dataset_id)
+            return [c for c in schema if c.get("is_active", True)]
+        except Exception:
+            # Legacy schema table might have a different PK - try direct query
+            try:
+                legacy_query = f"""
+                    SELECT column_name, column_type, position, masking_rule
+                    FROM {self.keyspace}.dataset_schema
+                    WHERE dataset_id = %s
+                """
+                result = self.db.execute(legacy_query, [dataset_id])
+                return [
+                    {
+                        "name": row.column_name,
+                        "type": getattr(row, "column_type", "str"),
+                        "mask_rule": getattr(row, "masking_rule", None),
+                        "is_active": True,
+                    }
+                    for row in result
+                ]
+            except Exception:
+                return []
+
+    @staticmethod
+    def _schema_revision(schema: List[Dict[str, Any]]) -> str:
+        """Fingerprint of the active columns and their masking rules.
+
+        Changes whenever the active column set (schema version / soft-delete) or
+        any masking rule changes, so it segments the pagination cache key by
+        schema version and masking revision (Mandatory #12).
+        """
+        material = "|".join(
+            f"{c['name']}:{c.get('type')}:{c.get('mask_rule') or ''}" for c in schema
+        )
+        return hashlib.sha1(material.encode()).hexdigest()[:12]
+
+    @staticmethod
+    def _masking_rules(schema: List[Dict[str, Any]]) -> Dict[str, str]:
+        return {c["name"]: c["mask_rule"] for c in schema if c.get("mask_rule")}
+
+    def _select_clause(
+        self,
+        schema: List[Dict[str, Any]],
+        base_cols: List[str],
+        requested: Optional[List[str]] = None,
+    ) -> str:
+        """Build the SELECT list from active schema columns instead of ``*`` so
+        soft-deleted / untracked physical columns are never returned
+        (Mandatory #11). Explicitly requested columns are restricted to active ones.
+        """
+        if not schema:
+            # No tracked schema at all (very old datasets): nothing can be
+            # soft-deleted and no masking rules exist, so * is the only option.
+            if not requested:
+                return "*"
+            names = requested
+        else:
+            active = [c["name"] for c in schema]
+            if requested:
+                active_set = set(active)
+                names = [c for c in requested if c in active_set]
+            else:
+                names = active
+        cols = list(base_cols)
+        for name in names:
+            safe = self._sanitize_col_name(name)
+            if safe not in cols:
+                cols.append(safe)
+        return ", ".join(cols)
+
+    @staticmethod
+    def _apply_masking(
+        row: Dict[str, Any], rules: Dict[str, str], user_role: str
+    ) -> None:
+        for col_name, mask_rule in rules.items():
+            if col_name in row:
+                row[col_name] = DataMasker.mask_value(row[col_name], mask_rule, user_role)
+
+    def get_rows(self, req: PageRequest) -> Tuple[List[Dict[str, Any]], int]:
+        """Get a paginated rows page with optional masking (cached)."""
+        try:
+            dataset_id = req.dataset_id
+            dataset = self.get_dataset(dataset_id)
+
+            # Active schema drives the select list, masking rules and cache key.
+            schema = self._active_schema(dataset_id)
+            schema_rev = self._schema_revision(schema)
+
+            cached = self.cache.get_rows_page(req, schema_rev)
             if cached is not None:
-                logger.debug(f"Cache hit for dataset {dataset_id} rows page={page}")
+                logger.debug(f"Cache hit for dataset {dataset_id} rows page={req.page}")
                 return cached
 
-            # Cache miss — query Cassandra
-            dataset = self.get_dataset(dataset_id)
-            masking_config = dataset.get("masking_config", {})
+            masking_rules = self._masking_rules(schema)
 
-            # Check table schema FIRST to decide query strategy
             table_name = self._get_table_name(dataset_id)
             use_legacy_query = not self._table_has_batch_id(table_name)
 
-            # Resolve batch_id — only relevant for new-format tables
+            batch_id = req.batch_id
             if not use_legacy_query and batch_id is None:
                 latest_batch = self.batch_service.get_latest_batch(dataset_id)
                 if latest_batch:
                     batch_id = latest_batch["batch_id"]
                 else:
-                    # New table format but no batches yet — no data
                     return [], 0
 
-            # Get schema to map storage names back to original names
-            schema = []
-            try:
-                schema = self.schema_service.get_schema(dataset_id)
-            except Exception:
-                # Legacy schema table might have different PK — try direct query
-                try:
-                    legacy_query = f"""
-                        SELECT column_name, column_type, position, mask_rule
-                        FROM {self.keyspace}.dataset_schema
-                        WHERE dataset_id = %s
-                    """
-                    result = self.db.execute(legacy_query, [dataset_id])
-                    schema = [
-                        {"name": row.column_name, "type": getattr(row, "column_type", "str")}
-                        for row in result
-                    ]
-                except Exception:
-                    schema = []
-            name_map = {self._sanitize_col_name(s["name"]): s["name"] for s in schema} if schema else {}
-            reverse_map = {s["name"]: self._sanitize_col_name(s["name"]) for s in schema} if schema else {}
+            name_map = {self._sanitize_col_name(c["name"]): c["name"] for c in schema}
 
-            # Calculate which chunks to fetch
-            offset = (page - 1) * page_size
+            offset = (req.page - 1) * req.page_size
             chunk_id = offset // 10000
             start_row = offset % 10000
 
-
-
-            # Column-level SQL: select only requested columns if specified
-            if columns:
-                base_cols = ["batch_id", "row_chunk_id", "row_id"] if not use_legacy_query else ["row_chunk_id", "row_id"]
-                safe_cols = list(base_cols)
-                for col in columns:
-                    safe_name = reverse_map.get(col, self._sanitize_col_name(col))
-                    if safe_name not in safe_cols:
-                        safe_cols.append(safe_name)
-                select_clause = ", ".join(safe_cols)
-            else:
-                select_clause = "*"
+            base_cols = (
+                ["row_chunk_id", "row_id"]
+                if use_legacy_query
+                else ["batch_id", "row_chunk_id", "row_id"]
+            )
+            select_clause = self._select_clause(
+                schema, base_cols, list(req.columns) if req.columns else None
+            )
 
             if use_legacy_query:
-                # Legacy table (no batch_id column)
                 query = f"""
                     SELECT {select_clause}
                     FROM {self.keyspace}.{table_name}
@@ -618,9 +681,7 @@ class DatasetService:
                     ORDER BY row_id ASC
                     LIMIT %s
                 """
-                result = self.db.execute(
-                    query, [chunk_id, page_size + start_row]
-                )
+                result = self.db.execute(query, [chunk_id, req.page_size + start_row])
             else:
                 query = f"""
                     SELECT {select_clause}
@@ -630,39 +691,24 @@ class DatasetService:
                     LIMIT %s
                 """
                 result = self.db.execute(
-                    query, [batch_id, chunk_id, page_size + start_row]
+                    query, [batch_id, chunk_id, req.page_size + start_row]
                 )
-            rows = list(result)[start_row : start_row + page_size]
+            rows = list(result)[start_row : start_row + req.page_size]
 
+            do_mask = req.apply_masking and req.user_role != Role.ADMIN.value
             processed_rows = []
             for row in rows:
-                # Reconstruct row data from columns
                 row_dict = {}
                 for field in row._fields:
-                    if field in ["batch_id", "row_chunk_id", "row_id"]:
+                    if field in ("batch_id", "row_chunk_id", "row_id"):
                         continue
-                    orig_name = name_map.get(field, field)
-                    row_dict[orig_name] = getattr(row, field)
-
-                # Apply masking
-                if apply_masking and user_role != "admin":
-                    for col_name, col_value in row_dict.items():
-                        if col_name in masking_config:
-                            mask_rule = masking_config[col_name]
-                            row_dict[col_name] = DataMasker.mask_value(
-                                col_value, mask_rule, user_role
-                            )
-
+                    row_dict[name_map.get(field, field)] = getattr(row, field)
+                if do_mask:
+                    self._apply_masking(row_dict, masking_rules, req.user_role)
                 processed_rows.append(row_dict)
 
             total = dataset.get("row_count", 0)
-
-            # Store in cache
-            self.cache.set_rows_page(
-                dataset_id, page, page_size, user_role,
-                processed_rows, total, col_key
-            )
-
+            self.cache.set_rows_page(req, processed_rows, total, schema_rev)
             return processed_rows, total
         except DatasetNotFoundException:
             raise
@@ -676,92 +722,60 @@ class DatasetService:
         format: str = "csv",
         user_role: str = "viewer",
     ) -> bytes:
-        """Export dataset to CSV, JSON, or Parquet format"""
+        """Export dataset to CSV or JSON (active schema columns only, masked for non-admins)."""
         try:
-            dataset = self.get_dataset(dataset_id)
+            self.get_dataset(dataset_id)
             table_name = self._get_table_name(dataset_id)
-
-            # Check if this is a legacy (pre-batch) table
             has_batch_id = self._table_has_batch_id(table_name)
 
+            schema = self._active_schema(dataset_id)
+            name_map = {self._sanitize_col_name(c["name"]): c["name"] for c in schema}
+            masking_rules = self._masking_rules(schema)
+
             if has_batch_id:
-                # New schema — resolve latest batch
                 latest_batch = self.batch_service.get_latest_batch(dataset_id)
                 if not latest_batch:
                     return b""  # No data
-
-                batch_id = latest_batch["batch_id"]
-
-                # Fetch all rows for the latest batch across all chunks
-                query = f"SELECT * FROM {self.keyspace}.{table_name} WHERE batch_id = %s AND row_chunk_id = %s"
-                
-                # Get schema for mapping
-                try:
-                    schema = self.schema_service.get_schema(dataset_id)
-                    name_map = {self._sanitize_col_name(s["name"]): s["name"] for s in schema}
-                except Exception:
-                    name_map = {}
-                
-                rows = []
-                chunk_id = 0
-                while True:
-                    result = list(self.db.execute(query, [batch_id, chunk_id]))
-                    if not result:
-                        break
-                    for row in result:
-                        row_dict = {}
-                        for field in row._fields:
-                            if field in ["batch_id", "row_chunk_id", "row_id"]:
-                                continue
-                            orig_name = name_map.get(field, field)
-                            row_dict[orig_name] = getattr(row, field)
-                        rows.append(row_dict)
-                    chunk_id += 1
+                select_clause = self._select_clause(
+                    schema, ["batch_id", "row_chunk_id", "row_id"]
+                )
+                query = (
+                    f"SELECT {select_clause} FROM {self.keyspace}.{table_name} "
+                    f"WHERE batch_id = %s AND row_chunk_id = %s"
+                )
+                key_params = [latest_batch["batch_id"]]
             else:
-                # Legacy table — no batch_id column, use old query
-                query = f"SELECT * FROM {self.keyspace}.{table_name} WHERE row_chunk_id = %s"
-                
-                try:
-                    schema = self.schema_service.get_schema(dataset_id)
-                    name_map = {self._sanitize_col_name(s["name"]): s["name"] for s in schema}
-                except Exception:
-                    name_map = {}
-                
-                rows = []
-                chunk_id = 0
-                while True:
-                    result = list(self.db.execute(query, [chunk_id]))
-                    if not result:
-                        break
-                    for row in result:
-                        row_dict = {}
-                        for field in row._fields:
-                            if field in ["row_chunk_id", "row_id"]:
-                                continue
-                            orig_name = name_map.get(field, field)
-                            row_dict[orig_name] = getattr(row, field)
-                        rows.append(row_dict)
-                    chunk_id += 1
+                select_clause = self._select_clause(schema, ["row_chunk_id", "row_id"])
+                query = (
+                    f"SELECT {select_clause} FROM {self.keyspace}.{table_name} "
+                    f"WHERE row_chunk_id = %s"
+                )
+                key_params = []
 
-            masking_config = dataset.get("masking_config", {})
+            rows = []
+            chunk_id = 0
+            while True:
+                result = list(self.db.execute(query, key_params + [chunk_id]))
+                if not result:
+                    break
+                for row in result:
+                    row_dict = {}
+                    for field in row._fields:
+                        if field in ("batch_id", "row_chunk_id", "row_id"):
+                            continue
+                        row_dict[name_map.get(field, field)] = getattr(row, field)
+                    rows.append(row_dict)
+                chunk_id += 1
 
-            # Apply masking for non-admin users
-            if user_role != "admin":
+            if user_role != Role.ADMIN.value:
                 for row in rows:
-                    for col_name, col_value in row.items():
-                        if col_name in masking_config:
-                            mask_rule = masking_config[col_name]
-                            row[col_name] = DataMasker.mask_value(
-                                col_value, mask_rule, user_role
-                            )
+                    self._apply_masking(row, masking_rules, user_role)
 
-            if format.lower() == "csv":
-                return self._export_csv(rows)
-            elif format.lower() == "json":
+            if format.lower() == "json":
                 return json.dumps(rows, default=str).encode()
-            else:
-                # Default to CSV
-                return self._export_csv(rows)
+            return self._export_csv(rows)
+        except DatasetNotFoundException:
+            raise
         except Exception as e:
             logger.error(f"Failed to export dataset: {e}")
             raise DatabaseException(f"Failed to export dataset: {str(e)}")

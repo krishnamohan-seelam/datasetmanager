@@ -6,9 +6,7 @@ from datetime import datetime
 
 from fastapi import APIRouter
 
-from app.cassandra_client import CassandraClient
-from app.core.config import settings
-from app.api.dependencies import logger
+from app.api.dependencies import get_db, logger
 
 router = APIRouter(tags=["Health"])
 
@@ -19,7 +17,10 @@ def health_check():
     logger.info("Health check endpoint called")
     cassandra_status = "unhealthy"
     try:
-        client = CassandraClient([settings.CASSANDRA_HOST], settings.CASSANDRA_PORT)
+        # Reuses the shared CassandraClient singleton instead of constructing
+        # a new one per request — repeated health-check traffic no longer
+        # grows the Cassandra connection count.
+        client = get_db()
         client.execute("SELECT now() FROM system.local;")
         cassandra_status = "healthy"
     except Exception as e:

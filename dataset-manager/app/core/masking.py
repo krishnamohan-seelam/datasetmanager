@@ -3,7 +3,7 @@ Data masking engine for Dataset Manager
 """
 
 import re
-from typing import Any, Optional, Dict
+from typing import Any, Callable, Dict, Optional
 from enum import Enum
 
 
@@ -16,7 +16,7 @@ class MaskingRule(str, Enum):
     CREDIT_CARD = "credit_card"
     NAME = "name"
     IP = "ip"
-    CUSTOM = "custom"
+    CUSTOM = "custom"  # used as "custom:<regex>"; dispatched in mask_value
     
     # Frontend aligned rules
     REDACT = "redact"
@@ -53,8 +53,6 @@ class DataMasker:
         except (ValueError, TypeError):
             return "***"
             
-    # Existing methods... (I will keep them in the actual replace call)
-
     @staticmethod
     def mask_email(email: str) -> str:
         """
@@ -197,28 +195,31 @@ class DataMasker:
         # Convert to string if not already
         str_value = str(value)
 
-        # Apply appropriate masking rule
-        if mask_rule in [MaskingRule.EMAIL, MaskingRule.PARTIAL_EMAIL]:
-            return DataMasker.mask_email(str_value)
-        elif mask_rule == MaskingRule.PHONE:
-            return DataMasker.mask_phone(str_value)
-        elif mask_rule == MaskingRule.SSN:
-            return DataMasker.mask_ssn(str_value)
-        elif mask_rule == MaskingRule.CREDIT_CARD:
-            return DataMasker.mask_credit_card(str_value)
-        elif mask_rule in [MaskingRule.NAME, MaskingRule.PARTIAL_TEXT]:
-            return DataMasker.mask_name(str_value)
-        elif mask_rule == MaskingRule.IP:
-            return DataMasker.mask_ip(str_value)
-        elif mask_rule == MaskingRule.REDACT:
-            return DataMasker.mask_redact(str_value)
-        elif mask_rule == MaskingRule.HASH:
-            return DataMasker.mask_hash(str_value)
-        elif mask_rule == MaskingRule.NUMERIC_ROUND:
-            return DataMasker.mask_numeric_round(str_value)
-        elif mask_rule.startswith("custom:"):
-            pattern = mask_rule.replace("custom:", "")
-            return DataMasker.mask_custom(str_value, pattern)
-        else:
+        # Custom regex rules are encoded as "custom:<pattern>" (MaskingRule.CUSTOM
+        # is the rule name; the pattern is its argument).
+        rule_name, _, rule_arg = str(getattr(mask_rule, "value", mask_rule)).partition(":")
+        if rule_name == MaskingRule.CUSTOM.value:
+            return DataMasker.mask_custom(str_value, rule_arg)
+
+        handler = _MASK_DISPATCH.get(rule_name)
+        if handler is None:
             # Unknown rule, don't mask
             return value
+        return handler(str_value)
+
+
+# Rule name -> masking function. Add new single-argument rules here; no need to
+# edit ``mask_value``.
+_MASK_DISPATCH: Dict[str, Callable[[str], Any]] = {
+    MaskingRule.EMAIL.value: DataMasker.mask_email,
+    MaskingRule.PARTIAL_EMAIL.value: DataMasker.mask_email,
+    MaskingRule.PHONE.value: DataMasker.mask_phone,
+    MaskingRule.SSN.value: DataMasker.mask_ssn,
+    MaskingRule.CREDIT_CARD.value: DataMasker.mask_credit_card,
+    MaskingRule.NAME.value: DataMasker.mask_name,
+    MaskingRule.PARTIAL_TEXT.value: DataMasker.mask_name,
+    MaskingRule.IP.value: DataMasker.mask_ip,
+    MaskingRule.REDACT.value: DataMasker.mask_redact,
+    MaskingRule.HASH.value: DataMasker.mask_hash,
+    MaskingRule.NUMERIC_ROUND.value: DataMasker.mask_numeric_round,
+}

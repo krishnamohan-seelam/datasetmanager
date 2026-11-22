@@ -3,13 +3,10 @@ from datetime import datetime, timedelta
 from passlib.context import CryptContext
 import jwt
 
+from app.core.config import settings
+
 # Password hashing context - Switched to PBKDF2 to avoid bcrypt's 72-byte limit
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
-
-# JWT settings (should be loaded from env in production)
-SECRET_KEY = "your-secret-key"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
 
 class User:
@@ -50,22 +47,16 @@ class User:
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
     expire = datetime.utcnow() + (
-        expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    encoded_jwt = jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
     return encoded_jwt
 
 
 def decode_access_token(token: str) -> Optional[dict]:
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
         return payload
     except jwt.PyJWTError:
         return None
-
-
-# Example usage (to be integrated with FastAPI endpoints)
-# user = User(email="test@example.com", hashed_password=User.hash_password("password"))
-# token = create_access_token({"sub": user.email, "role": user.role})
-# payload = decode_access_token(token)

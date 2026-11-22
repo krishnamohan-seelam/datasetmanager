@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.auth_utils import User, create_access_token
 from app.core.security import get_current_user
 from app.schemas.common import AuthResponse, RegisterRequest, LoginRequest, UserBase
-from app.api.dependencies import db, logger
+from app.api.dependencies import get_db, logger
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 
@@ -19,10 +19,13 @@ router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 def register(user_data: RegisterRequest):
     """Register new user"""
     try:
+        db = get_db()
         email = user_data.email
         password = user_data.password
         full_name = user_data.full_name
-        role = user_data.role or "viewer"
+        # Self-registration always creates a viewer; RegisterRequest has no
+        # `role` field, so there is no client input to escalate from.
+        role = "viewer"
 
         # Check if user exists
         query = "SELECT email FROM dataset_manager.users WHERE email = %s LIMIT 1;"
@@ -68,22 +71,31 @@ def register(user_data: RegisterRequest):
 def login(login_data: LoginRequest):
     """Login user and return JWT token"""
     try:
+        db = get_db()
         email = login_data.email
         password = login_data.password
 
         # Get user
-        query = "SELECT email, password_hash, role FROM dataset_manager.users WHERE email = %s LIMIT 1;"
+        query = (
+            "SELECT email, password_hash, role, is_active, full_name "
+            "FROM dataset_manager.users WHERE email = %s LIMIT 1;"
+        )
         result = db.execute(query, (email,))
         row = result.one()
 
         if not row:
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
+        if not row.is_active:
+            raise HTTPException(status_code=401, detail="Account is deactivated")
+
         # Verify password
         user = User(
             email=row.email,
             hashed_password=row.password_hash,
+            full_name=row.full_name,
             role=row.role,
+            is_active=row.is_active,
         )
         if not user.verify_password(password):
             raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -96,6 +108,7 @@ def login(login_data: LoginRequest):
             token=access_token,
             access_token=access_token,
             user=UserBase(email=user.email, full_name=user.full_name, role=user.role),
+            message="Login successful",
         )
     except HTTPException:
         raise

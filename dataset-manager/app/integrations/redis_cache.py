@@ -1,6 +1,10 @@
 """
 Redis Cache Service for Dataset Manager
-Caches metadata and query results
+
+Scope: dataset-metadata, user-listing and query-result caching ONLY.
+Row pages and dataset listings are owned by
+``app.services.pagination_cache.PaginationCacheService``; do not cache rows here.
+``invalidate_dataset`` delegates to the pagination cache so one call clears both.
 """
 
 import logging
@@ -23,6 +27,7 @@ class RedisCacheService:
         password: str = None,
         db: int = 0,
         default_ttl: int = 3600,
+        pagination_cache=None,
     ):
         self.host = host or os.getenv("REDIS_HOST", "localhost")
         self.port = port or int(os.getenv("REDIS_PORT", 6379))
@@ -30,7 +35,19 @@ class RedisCacheService:
         self.db = db
         self.default_ttl = default_ttl
         self.client = None
+        # Row-page cache this service must keep in sync on invalidation.
+        # Injected, or lazily created against the same Redis server.
+        self._pagination_cache = pagination_cache
         self._connect()
+
+    def _get_pagination_cache(self):
+        if self._pagination_cache is None:
+            from app.services.pagination_cache import PaginationCacheService
+
+            self._pagination_cache = PaginationCacheService(
+                host=self.host, port=self.port, password=self.password
+            )
+        return self._pagination_cache
 
     def _connect(self):
         """Connect to Redis"""
@@ -93,20 +110,31 @@ class RedisCacheService:
         """Cache dataset metadata"""
         return self.set(f"dataset:{dataset_id}:metadata", metadata, ttl)
 
-    def invalidate_dataset(self, dataset_id: str):
-        """Invalidate all cache for a dataset"""
+    def _invalidate_pattern(self, pattern: str) -> int:
+        """Scan-and-delete every key matching ``pattern``. Returns count deleted."""
         try:
-            pattern = f"dataset:{dataset_id}:*"
+            deleted = 0
             cursor = 0
             while True:
                 cursor, keys = self.client.scan(cursor, match=pattern)
                 if keys:
-                    self.client.delete(*keys)
+                    deleted += self.client.delete(*keys)
                 if cursor == 0:
                     break
-            logger.info(f"Invalidated cache for dataset {dataset_id}")
+            return deleted
         except Exception as e:
-            logger.warning(f"Cache invalidation failed: {str(e)}")
+            logger.warning(f"Cache invalidation failed for {pattern}: {str(e)}")
+            return 0
+
+    def invalidate_dataset(self, dataset_id: str):
+        """Invalidate all cache for a dataset: this service's metadata keys AND
+        the pagination cache's row pages (single "dataset changed" signal)."""
+        self._invalidate_pattern(f"dataset:{dataset_id}:*")
+        try:
+            self._get_pagination_cache().invalidate_dataset(dataset_id)
+        except Exception as e:
+            logger.warning(f"Pagination cache invalidation failed: {str(e)}")
+        logger.info(f"Invalidated cache for dataset {dataset_id}")
 
     def get_user_datasets(self, user_email: str) -> Optional[List[dict]]:
         """Get cached user's datasets list"""
@@ -120,18 +148,8 @@ class RedisCacheService:
 
     def invalidate_user_cache(self, user_email: str):
         """Invalidate all cache for a user"""
-        try:
-            pattern = f"user:{user_email}:*"
-            cursor = 0
-            while True:
-                cursor, keys = self.client.scan(cursor, match=pattern)
-                if keys:
-                    self.client.delete(*keys)
-                if cursor == 0:
-                    break
-            logger.info(f"Invalidated cache for user {user_email}")
-        except Exception as e:
-            logger.warning(f"Cache invalidation failed: {str(e)}")
+        self._invalidate_pattern(f"user:{user_email}:*")
+        logger.info(f"Invalidated cache for user {user_email}")
 
     def get_query_result(self, query_hash: str) -> Optional[dict]:
         """Get cached query result"""

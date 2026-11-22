@@ -21,6 +21,14 @@ class BatchFrequency(str, Enum):
     MONTHLY = "monthly"
 
 
+class Role(str, Enum):
+    """Dataset-manager roles. Shared everywhere a role is compared or validated
+    so a typo or new role name is a type error, not a silent no-op."""
+    ADMIN = "admin"
+    CONTRIBUTOR = "contributor"
+    VIEWER = "viewer"
+
+
 # ── Pagination ───────────────────────────────────────────────────────────
 
 class PaginationParams(BaseModel):
@@ -43,7 +51,7 @@ class PaginatedResponse(BaseModel, Generic[T]):
 class UserBase(BaseModel):
     email: str
     full_name: Optional[str] = None
-    role: str = "viewer"
+    role: Role = Role.VIEWER
 
 
 class UserCreate(UserBase):
@@ -189,7 +197,7 @@ class RowsQuery(BaseModel):
 
 class PermissionBase(BaseModel):
     user_email: str
-    role: str = Field(default="viewer", pattern="^(admin|contributor|viewer)$")
+    role: Role = Role.VIEWER
 
 
 class PermissionResponse(PermissionBase):
@@ -213,10 +221,12 @@ class LoginRequest(BaseModel):
 
 
 class RegisterRequest(BaseModel):
+    """Self-registration request. No `role` field: every self-registered
+    account is created as viewer; role elevation only happens via an
+    admin-only endpoint, never from client-supplied registration input."""
     email: str
     password: str
     full_name: Optional[str] = None
-    role: Optional[str] = "viewer"
 
 
 # ── ETL Job ──────────────────────────────────────────────────────────────
