@@ -25,6 +25,19 @@ class BatchService:
     def __init__(self):
         self.db = CassandraClient([settings.CASSANDRA_HOST], settings.CASSANDRA_PORT)
         self.keyspace = settings.CASSANDRA_KEYSPACE
+        self._pagination_cache = None
+
+    def _get_pagination_cache(self):
+        """Lazily-constructed handle to the row-page cache, only needed by
+        delete_batch/delete_all_batches' invalidation calls. Same
+        lazy-construction pattern as SchemaService/RedisCacheService."""
+        if self._pagination_cache is None:
+            from .pagination_cache import PaginationCacheService
+
+            self._pagination_cache = PaginationCacheService(
+                host=settings.REDIS_HOST, port=settings.REDIS_PORT
+            )
+        return self._pagination_cache
 
     # ── Public API ───────────────────────────────────────────────────
 
@@ -170,6 +183,12 @@ class BatchService:
         """
         Delete a specific batch — removes batch registry entry
         and the corresponding rows from the ds_rows_* table.
+
+        Invalidates the pagination cache on success (Mandatory #15's
+        batch-delete half — the row/column half was closed in Module 6).
+        Without this, a cached row page for the deleted batch kept being
+        served from Redis for up to the default TTL after the underlying
+        rows were gone.
         """
         try:
             # Find the batch to get batch_date (needed for partition key)
@@ -201,6 +220,11 @@ class BatchService:
             """
             self.db.execute(query, [dataset_id, batch["batch_date"], batch_id])
 
+            try:
+                self._get_pagination_cache().invalidate_dataset(dataset_id)
+            except Exception as e:
+                logger.warning(f"Cache invalidation failed after deleting batch {batch_id}: {e}")
+
             logger.info(f"Deleted batch {batch_id} from dataset {dataset_id}")
             return True
 
@@ -209,7 +233,12 @@ class BatchService:
             raise DatabaseException(f"Failed to delete batch: {str(e)}")
 
     def delete_all_batches(self, dataset_id: UUID) -> int:
-        """Delete all batches for a dataset (used on dataset deletion)."""
+        """Delete all batches for a dataset (used on dataset deletion).
+
+        Also invalidates the pagination cache (Mandatory #15) — harmless
+        when called as part of full dataset teardown, and necessary for any
+        other caller that bulk-deletes batches without deleting the dataset.
+        """
         try:
             query = f"""
                 SELECT batch_date, batch_id
@@ -224,6 +253,12 @@ class BatchService:
                         WHERE dataset_id = %s AND batch_date = %s AND batch_id = %s""",
                     [dataset_id, row.batch_date, row.batch_id],
                 )
+
+            if rows:
+                try:
+                    self._get_pagination_cache().invalidate_dataset(dataset_id)
+                except Exception as e:
+                    logger.warning(f"Cache invalidation failed after deleting all batches for {dataset_id}: {e}")
 
             logger.info(f"Deleted {len(rows)} batches for dataset {dataset_id}")
             return len(rows)

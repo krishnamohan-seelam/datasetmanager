@@ -476,6 +476,61 @@ class DatasetService:
             logger.error(f"Failed to update dataset: {e}")
             raise DatabaseException(f"Failed to update dataset: {str(e)}")
 
+    _MAX_ROW_COUNT_CAS_ATTEMPTS = 5
+
+    def _accumulate_row_count(
+        self,
+        dataset_id: UUID,
+        delta: int,
+        now: datetime,
+        batch_id: UUID,
+        batch_date: datetime,
+        total_batches: int,
+        schema_version: int,
+    ) -> int:
+        """Atomically add `delta` to datasets.row_count (plus the other
+        per-insert metadata fields) via a Cassandra lightweight transaction
+        (UPDATE ... IF row_count = ?), retrying on CAS failure.
+
+        row_count can't be a Cassandra COUNTER column — a table with a
+        counter column may contain only counter columns besides its primary
+        key, and `datasets` mixes many regular columns — so a real counter
+        type isn't usable here (Mandatory #16's first option). A plain
+        read-then-write would lose updates under concurrent batch uploads to
+        the same dataset the same way Module 6's schema version race did,
+        so this uses the same CAS-retry pattern as
+        SchemaService._claim_version instead.
+
+        Returns the new total row_count.
+        """
+        for _attempt in range(self._MAX_ROW_COUNT_CAS_ATTEMPTS):
+            current = self.get_dataset(dataset_id)
+            current_count = current["row_count"]
+            new_count = current_count + delta
+
+            query = f"""
+                UPDATE {self.keyspace}.datasets
+                SET row_count = %s, updated_at = %s,
+                    latest_batch_id = %s, latest_batch_date = %s,
+                    total_batches = %s, schema_version = %s
+                WHERE dataset_id = %s
+                IF row_count = %s
+            """
+            result = self.db.execute(query, [
+                new_count, now, batch_id, batch_date,
+                total_batches, schema_version, dataset_id, current_count,
+            ])
+            if result.was_applied:
+                return new_count
+            # Someone else updated row_count between our read and this
+            # write — retry against the now-current value instead of
+            # overwriting their update.
+
+        raise DatabaseException(
+            f"Could not update row_count for dataset {dataset_id} after "
+            f"{self._MAX_ROW_COUNT_CAS_ATTEMPTS} attempts — too many concurrent writers"
+        )
+
     def delete_dataset(self, dataset_id: UUID) -> bool:
         """Delete dataset and all associated data (schema, batches, rows, permissions)"""
         try:
@@ -618,19 +673,15 @@ class DatasetService:
                 if batch_count > 0:
                     self.db.execute(batch)
 
-            # Update dataset metadata
+            # Update dataset metadata — row_count is accumulated via a CAS
+            # retry loop, not overwritten with just this call's count
+            # (Mandatory #16: a second batch upload used to discard the
+            # running total instead of adding to it).
             total_batches = self.batch_service.count_batches(dataset_id)
-            query = f"""
-                UPDATE {self.keyspace}.datasets
-                SET row_count = %s, updated_at = %s,
-                    latest_batch_id = %s, latest_batch_date = %s,
-                    total_batches = %s, schema_version = %s
-                WHERE dataset_id = %s
-            """
-            self.db.execute(query, [
-                inserted_count, now, batch_id, batch_date,
-                total_batches, schema_version, dataset_id,
-            ])
+            self._accumulate_row_count(
+                dataset_id, inserted_count, now, batch_id, batch_date,
+                total_batches, schema_version,
+            )
 
             # Update batch status
             self.batch_service.update_batch_status(
